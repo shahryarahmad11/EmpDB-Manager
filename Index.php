@@ -4,9 +4,9 @@
  * Main entry point for the Employee-Department Management System.
  * All sections: Table Viewer, Full Join View, Employee Search, and CRUD.
  *
- * Student: Shahryar Ahmad   22i-0939-E   Lab 10
+ * Project by shahryar ahmad
  */
-
+require_once 'auth.php';
 require_once 'functions.php';
 require_once 'classes.php';
 
