@@ -48,6 +48,8 @@ A full-stack web application built with **PHP** and **Microsoft SQL Server** to 
 - **Insert department** — add new department records
 - **Update employee** — edit existing employee fields
 - **Delete employee** — with safety check (employees assigned to projects cannot be deleted)
+- **Export to CSV** — export any table's data as a dated `.csv` file (e.g. `EMP_2026-04-24.csv`) with one click
+- **← Dashboard button** — quick navigation back to dashboard from any DB Manager tab
 
 ### 🎨 UI & Design
 - Dark theme throughout with a consistent `#0f1117` base

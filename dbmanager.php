@@ -1,58 +1,87 @@
 <?php
 /*
- * index.php
+ * dbmanager.php
  * Main entry point for the Employee-Department Management System.
  * All sections: Table Viewer, Full Join View, Employee Search, and CRUD.
  *
- * Project by shahryar ahmad
+ * Project by Shahryar Ahmad
  */
 require_once 'auth.php';
 require_once 'functions.php';
 require_once 'classes.php';
 
-// We collect any action result messages here to display after processing
+// ── CSV Export Handler (must run before any HTML output) ──
+if (isset($_GET['export_csv']) && $_GET['export_csv'] == '1'
+    && isset($_GET['view_table']) && $_GET['view_table'] != '') {
+
+    $export_table = preg_replace('/[^a-zA-Z0-9_]/', '', $_GET['view_table']);
+    $conn = get_connection();
+    $res  = sqlsrv_query($conn, "SELECT * FROM $export_table");
+
+    if ($res) {
+        $filename = $export_table . '_' . date('Y-m-d') . '.csv';
+        header('Content-Type: text/csv');
+        header('Content-Disposition: attachment; filename="' . $filename . '"');
+
+        $output = fopen('php://output', 'w');
+
+        $first_row = sqlsrv_fetch_array($res, SQLSRV_FETCH_ASSOC);
+        if ($first_row) {
+            fputcsv($output, array_keys($first_row));
+
+            $row_data = array();
+            foreach ($first_row as $val) {
+                if ($val instanceof DateTime) $row_data[] = $val->format('Y-m-d');
+                else $row_data[] = ($val === null) ? '' : $val;
+            }
+            fputcsv($output, $row_data);
+
+            while ($row = sqlsrv_fetch_array($res, SQLSRV_FETCH_ASSOC)) {
+                $row_data = array();
+                foreach ($row as $val) {
+                    if ($val instanceof DateTime) $row_data[] = $val->format('Y-m-d');
+                    else $row_data[] = ($val === null) ? '' : $val;
+                }
+                fputcsv($output, $row_data);
+            }
+        }
+
+        fclose($output);
+        sqlsrv_close($conn);
+        exit();
+    }
+    sqlsrv_close($conn);
+}
+
+// ── Action message collector ──
 $action_msg = '';
 
-/* -----------------------------------------------
-   Handle POST form submissions for CRUD operations
------------------------------------------------ */
 if ($_SERVER['REQUEST_METHOD'] == 'POST') {
-
     if (isset($_POST['action'])) {
         $action = $_POST['action'];
-
         if ($action == 'insert_emp') {
-            // Insert new employee using posted values
             $action_msg = insert_employee(
                 $_POST['empno'], $_POST['ename'], $_POST['job'],
                 $_POST['mgr'],   $_POST['hiredate'], $_POST['sal'],
                 $_POST['comm'],  $_POST['deptno']
             );
-
         } else if ($action == 'insert_dept') {
-            // Insert new department
             $action_msg = insert_department(
                 $_POST['deptno'], $_POST['dname'], $_POST['loc']
             );
-
         } else if ($action == 'update_emp') {
-            // Update existing employee
             $action_msg = update_employee(
                 $_POST['empno'], $_POST['ename'], $_POST['job'],
                 $_POST['sal'],   $_POST['comm'],  $_POST['deptno']
             );
-
         } else if ($action == 'delete_emp') {
-            // Delete employee by empno
             $action_msg = delete_employee($_POST['del_empno']);
         }
     }
 }
 
-// Get all table names for the dropdown
 $all_tables = get_all_tables();
 
-// Check if the user selected a table to view
 $selected_table = '';
 $table_rows     = array();
 if (isset($_GET['view_table']) && $_GET['view_table'] != '') {
@@ -60,34 +89,37 @@ if (isset($_GET['view_table']) && $_GET['view_table'] != '') {
     $table_rows     = get_table_data($selected_table);
 }
 
-// Check if user requested the full join view
 $show_full_join = isset($_GET['full_join']) && $_GET['full_join'] == '1';
 $full_join_rows = array();
 if ($show_full_join) {
     $full_join_rows = get_full_join_data();
 }
 
-// Check if user is searching by employee ID
-$search_result  = array();
-$search_empno   = '';
-$search_table   = 'all';
+$search_result = array();
+$search_empno  = '';
+$search_table  = 'all';
 if (isset($_GET['search_id']) && $_GET['search_id'] != '') {
     $search_empno  = $_GET['search_id'];
     $search_table  = isset($_GET['search_table']) ? $_GET['search_table'] : 'all';
     $search_result = search_employee_by_id($search_empno, $search_table);
 }
 
-// Pre-load employee for update if update_id is passed
 $update_emp = null;
 if (isset($_GET['update_id']) && $_GET['update_id'] != '') {
     $update_emp = get_employee_by_id($_GET['update_id']);
 }
 
-// Decide which section tab is active
 $active_tab = isset($_GET['tab']) ? $_GET['tab'] : 'viewer';
-if ($show_full_join)  $active_tab = 'join';
-if ($search_empno)    $active_tab = 'search';
-if ($update_emp)      $active_tab = 'crud';
+if ($show_full_join) $active_tab = 'join';
+if ($search_empno)   $active_tab = 'search';
+if ($update_emp)     $active_tab = 'crud';
+
+// Greeting logic
+$first_name = explode(' ', $_SESSION['user_name'])[0];
+$hour = (int)date('H');
+if ($hour < 12)      $greeting = 'Good morning';
+elseif ($hour < 17)  $greeting = 'Good afternoon';
+else                 $greeting = 'Good evening';
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -96,10 +128,8 @@ if ($update_emp)      $active_tab = 'crud';
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>EmpDept Management System</title>
     <style>
-        /* Import a clean, professional font */
         @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;400;600;700&display=swap');
 
-        /* CSS variables for consistent theming */
         :root {
             --bg:        #0f1117;
             --surface:   #1a1d27;
@@ -116,11 +146,7 @@ if ($update_emp)      $active_tab = 'crud';
             --sans:      'IBM Plex Sans', sans-serif;
         }
 
-        * {
-            box-sizing: border-box;
-            margin: 0;
-            padding: 0;
-        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
 
         body {
             background: var(--bg);
@@ -131,7 +157,6 @@ if ($update_emp)      $active_tab = 'crud';
             min-height: 100vh;
         }
 
-        /* Top header bar */
         .header {
             background: var(--surface);
             border-bottom: 1px solid var(--border);
@@ -139,6 +164,7 @@ if ($update_emp)      $active_tab = 'crud';
             display: flex;
             align-items: center;
             justify-content: space-between;
+            gap: 16px;
         }
 
         .header-title {
@@ -146,21 +172,47 @@ if ($update_emp)      $active_tab = 'crud';
             font-weight: 700;
             color: var(--accent);
             letter-spacing: 0.5px;
+            white-space: nowrap;
         }
 
-        .header-meta {
-            font-family: var(--mono);
-            font-size: 12px;
+        .header-right {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+
+        .header-greeting {
+            font-family: var(--sans);
+            font-size: 13px;
             color: var(--text-dim);
-            text-align: right;
-            line-height: 1.8;
+            white-space: nowrap;
         }
 
-        .header-meta span {
-            color: var(--accent2);
+        .header-greeting strong {
+            color: var(--accent);
         }
 
-        /* Navigation tabs */
+        .btn-dashboard {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            background: var(--surface2);
+            color: var(--accent);
+            padding: 7px 14px;
+            border-radius: 6px;
+            text-decoration: none;
+            font-size: 12px;
+            font-weight: 600;
+            border: 1px solid var(--border);
+            transition: background 0.2s, border-color 0.2s;
+            white-space: nowrap;
+        }
+
+        .btn-dashboard:hover {
+            background: var(--border);
+            border-color: var(--accent);
+        }
+
         .nav {
             background: var(--surface);
             border-bottom: 1px solid var(--border);
@@ -180,23 +232,15 @@ if ($update_emp)      $active_tab = 'crud';
             transition: color 0.2s, border-color 0.2s;
         }
 
-        .nav a:hover {
-            color: var(--text);
-        }
+        .nav a:hover { color: var(--text); }
+        .nav a.active { color: var(--accent); border-bottom-color: var(--accent); }
 
-        .nav a.active {
-            color: var(--accent);
-            border-bottom-color: var(--accent);
-        }
-
-        /* Main content wrapper */
         .container {
             max-width: 1300px;
             margin: 0 auto;
             padding: 32px;
         }
 
-        /* Section card */
         .card {
             background: var(--surface);
             border: 1px solid var(--border);
@@ -224,7 +268,6 @@ if ($update_emp)      $active_tab = 'crud';
             border-radius: 2px;
         }
 
-        /* Forms */
         .form-row {
             display: flex;
             flex-wrap: wrap;
@@ -265,11 +308,8 @@ if ($update_emp)      $active_tab = 'crud';
             transition: border-color 0.2s;
         }
 
-        input:focus, select:focus {
-            border-color: var(--accent);
-        }
+        input:focus, select:focus { border-color: var(--accent); }
 
-        /* Buttons */
         .btn {
             padding: 9px 20px;
             border: none;
@@ -285,13 +325,12 @@ if ($update_emp)      $active_tab = 'crud';
         .btn:hover { opacity: 0.85; }
         .btn:active { transform: scale(0.98); }
 
-        .btn-primary  { background: var(--accent);  color: #fff; }
-        .btn-success  { background: var(--success);  color: #0f1117; }
-        .btn-danger   { background: var(--danger);   color: #fff; }
-        .btn-warning  { background: var(--warning);  color: #0f1117; }
-        .btn-secondary{ background: var(--surface2); color: var(--text); border: 1px solid var(--border); }
+        .btn-primary   { background: var(--accent);   color: #fff; }
+        .btn-success   { background: var(--success);  color: #0f1117; }
+        .btn-danger    { background: var(--danger);   color: #fff; }
+        .btn-warning   { background: var(--warning);  color: #0f1117; }
+        .btn-secondary { background: var(--surface2); color: var(--text); border: 1px solid var(--border); }
 
-        /* Result message banner */
         .msg-banner {
             padding: 12px 18px;
             border-radius: 6px;
@@ -301,24 +340,16 @@ if ($update_emp)      $active_tab = 'crud';
         }
 
         .msg-success { background: rgba(62,207,142,0.12); border: 1px solid var(--success); color: var(--success); }
-        .msg-error   { background: rgba(244, 96, 96,0.12); border: 1px solid var(--danger);  color: var(--danger);  }
+        .msg-error   { background: rgba(244,96,96,0.12);  border: 1px solid var(--danger);  color: var(--danger);  }
 
-        /* Data tables */
         .table-wrap {
             overflow-x: auto;
             border-radius: 6px;
             border: 1px solid var(--border);
         }
 
-        table {
-            width: 100%;
-            border-collapse: collapse;
-            font-size: 13px;
-        }
-
-        thead tr {
-            background: var(--surface2);
-        }
+        table { width: 100%; border-collapse: collapse; font-size: 13px; }
+        thead tr { background: var(--surface2); }
 
         th {
             padding: 10px 14px;
@@ -338,19 +369,10 @@ if ($update_emp)      $active_tab = 'crud';
             color: var(--text);
         }
 
-        tbody tr:hover {
-            background: var(--surface2);
-        }
+        tbody tr:hover { background: var(--surface2); }
+        tbody tr:last-child td { border-bottom: none; }
 
-        tbody tr:last-child td {
-            border-bottom: none;
-        }
-
-        .null-val {
-            color: var(--text-dim);
-            font-family: var(--mono);
-        }
-
+        .null-val   { color: var(--text-dim); font-family: var(--mono); }
         .table-title {
             font-size: 13px;
             font-weight: 700;
@@ -361,17 +383,16 @@ if ($update_emp)      $active_tab = 'crud';
             font-family: var(--mono);
         }
 
-        .no-data {
-            color: var(--text-dim);
-            font-style: italic;
-            padding: 12px 0;
+        .no-data   { color: var(--text-dim); font-style: italic; padding: 12px 0; }
+        .error-msg { color: var(--danger); }
+
+        .export-bar {
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            margin-top: 12px;
         }
 
-        .error-msg {
-            color: var(--danger);
-        }
-
-        /* CRUD sub-tabs */
         .sub-tabs {
             display: flex;
             gap: 8px;
@@ -397,16 +418,9 @@ if ($update_emp)      $active_tab = 'crud';
             border-color: var(--accent);
         }
 
-        /* Separator between CRUD forms */
-        .form-section {
-            display: none;
-        }
+        .form-section { display: none; }
+        .form-section.visible { display: block; }
 
-        .form-section.visible {
-            display: block;
-        }
-
-        /* Divider */
         hr.divider {
             border: none;
             border-top: 1px solid var(--border);
@@ -416,19 +430,18 @@ if ($update_emp)      $active_tab = 'crud';
 </head>
 <body>
 
-<!-- =============================================
-     PAGE HEADER â€” shows student info
-============================================= -->
+<!-- HEADER -->
 <div class="header">
     <div class="header-title">&#9670; EmpDept Management System</div>
-    <div class="header-meta">
-        Shahryar Ahmad &nbsp;|&nbsp; <span>22i-0939-E</span> &nbsp;|&nbsp; Lab 10
+    <div class="header-right">
+        <span class="header-greeting">
+            <?= htmlspecialchars($greeting) ?>, <strong><?= htmlspecialchars($first_name) ?></strong> &#128075;
+        </span>
+        <a href="dashboard.php" class="btn-dashboard">&#8592; Dashboard</a>
     </div>
 </div>
 
-<!-- =============================================
-     NAVIGATION TABS
-============================================= -->
+<!-- NAVIGATION TABS -->
 <nav class="nav">
     <a href="?tab=viewer"  class="<?php echo ($active_tab == 'viewer') ? 'active' : ''; ?>">Table Viewer</a>
     <a href="?full_join=1" class="<?php echo ($active_tab == 'join')   ? 'active' : ''; ?>">Full DB Join</a>
@@ -439,7 +452,6 @@ if ($update_emp)      $active_tab = 'crud';
 <div class="container">
 
 <?php
-// Show action result message if any (from insert/update/delete)
 if ($action_msg != '') {
     $is_error = (stripos($action_msg, 'error') !== false);
     $cls = $is_error ? 'msg-error' : 'msg-success';
@@ -447,13 +459,10 @@ if ($action_msg != '') {
 }
 ?>
 
-<!-- =============================================
-     SECTION 1: TABLE VIEWER
-============================================= -->
+<!-- SECTION 1: TABLE VIEWER -->
 <?php if ($active_tab == 'viewer'): ?>
 <div class="card">
     <div class="card-title">Table Viewer</div>
-
     <form method="GET" action="">
         <input type="hidden" name="tab" value="viewer">
         <div class="form-row">
@@ -461,58 +470,47 @@ if ($action_msg != '') {
                 <label for="view_table">Select a table</label>
                 <select name="view_table" id="view_table">
                     <option value="">-- Choose Table --</option>
-                    <?php
-                    // Loop through all tables and build the dropdown
-                    foreach ($all_tables as $tbl) {
+                    <?php foreach ($all_tables as $tbl) {
                         $sel = ($tbl == $selected_table) ? 'selected' : '';
-                        echo "<option value='" . htmlspecialchars($tbl) . "' $sel>"
-                           . htmlspecialchars($tbl) . "</option>";
-                    }
-                    ?>
+                        echo "<option value='" . htmlspecialchars($tbl) . "' $sel>" . htmlspecialchars($tbl) . "</option>";
+                    } ?>
                 </select>
             </div>
             <button type="submit" class="btn btn-primary">View Records</button>
         </div>
     </form>
 
-    <?php
-    // If a table was selected, render its data
-    if ($selected_table != '') {
-        if (!empty($table_rows)) {
-            render_table($table_rows, $selected_table);
-        } else {
-            echo "<p class='no-data'>No records in table <strong>$selected_table</strong>.</p>";
-        }
-    }
-    ?>
+    <?php if ($selected_table != ''): ?>
+        <?php if (!empty($table_rows)): ?>
+            <?php render_table($table_rows, $selected_table); ?>
+            <div class="export-bar">
+                <a href="?tab=viewer&view_table=<?= urlencode($selected_table) ?>&export_csv=1"
+                   class="btn btn-secondary" style="font-size:12px;">
+                    &#8595; Export as CSV
+                </a>
+            </div>
+        <?php else: ?>
+            <p class="no-data">No records in table <strong><?= htmlspecialchars($selected_table) ?></strong>.</p>
+        <?php endif; ?>
+    <?php endif; ?>
 </div>
 <?php endif; ?>
 
-<!-- =============================================
-     SECTION 2: FULL DATABASE JOIN VIEW
-============================================= -->
+<!-- SECTION 2: FULL DATABASE JOIN VIEW -->
 <?php if ($active_tab == 'join'): ?>
 <div class="card">
-    <div class="card-title">Full Database View â€” Joined</div>
+    <div class="card-title">Full Database View &mdash; Joined</div>
     <p style="color:var(--text-dim); margin-bottom:16px; font-size:13px;">
-        Joining EMP &#8594; DEPT &#8594; SALGRADE &#8594; ProjAssign &#8594; Project. NULL values shown as â€”
+        Joining EMP &#8594; DEPT &#8594; SALGRADE &#8594; ProjAssign &#8594; Project. NULL values shown as &mdash;
     </p>
-    <?php
-    // Render the full joined result set
-    if ($show_full_join) {
-        render_table($full_join_rows);
-    }
-    ?>
+    <?php if ($show_full_join) { render_table($full_join_rows); } ?>
 </div>
 <?php endif; ?>
 
-<!-- =============================================
-     SECTION 3: EMPLOYEE SEARCH BY ID
-============================================= -->
+<!-- SECTION 3: EMPLOYEE SEARCH BY ID -->
 <?php if ($active_tab == 'search'): ?>
 <div class="card">
     <div class="card-title">Employee Search by ID</div>
-
     <form method="GET" action="">
         <input type="hidden" name="tab" value="search">
         <div class="form-row">
@@ -532,13 +530,10 @@ if ($action_msg != '') {
                     <option value="Project"  <?php echo ($search_table=='Project')  ? 'selected':''; ?>>Project</option>
                 </select>
             </div>
-            <button type="submit" class="btn btn-primary"
-                    onclick="return validate_search();">Search</button>
+            <button type="submit" class="btn btn-primary" onclick="return validate_search();">Search</button>
         </div>
     </form>
-
     <?php
-    // Display search results â€” loop through each table's results
     if (!empty($search_result)) {
         foreach ($search_result as $tbl_name => $rows) {
             render_table($rows, $tbl_name);
@@ -550,14 +545,11 @@ if ($action_msg != '') {
 </div>
 <?php endif; ?>
 
-<!-- =============================================
-     SECTION 4: CRUD OPERATIONS
-============================================= -->
+<!-- SECTION 4: CRUD OPERATIONS -->
 <?php if ($active_tab == 'crud'): ?>
 <div class="card">
     <div class="card-title">CRUD Operations</div>
 
-    <!-- Sub-navigation for CRUD actions -->
     <div class="sub-tabs">
         <a href="?tab=crud&crud=insert_emp"  class="sub-tab <?php echo (!isset($_GET['crud']) || $_GET['crud']=='insert_emp')  ? 'active':''; ?>">Insert Employee</a>
         <a href="?tab=crud&crud=insert_dept" class="sub-tab <?php echo (isset($_GET['crud']) && $_GET['crud']=='insert_dept') ? 'active':''; ?>">Insert Department</a>
@@ -566,16 +558,9 @@ if ($action_msg != '') {
         <a href="?tab=crud&crud=query"       class="sub-tab <?php echo (isset($_GET['crud']) && $_GET['crud']=='query')       ? 'active':''; ?>">Query / Search</a>
     </div>
 
-    <?php
-    // Determine which sub-section is open
-    $crud_section = isset($_GET['crud']) ? $_GET['crud'] : 'insert_emp';
-    // Also open crud tab if we received a POST result
-    if ($action_msg != '') {
-        // Keep whatever section the user was on
-    }
-    ?>
+    <?php $crud_section = isset($_GET['crud']) ? $_GET['crud'] : 'insert_emp'; ?>
 
-    <!-- ------ INSERT EMPLOYEE FORM ------ -->
+    <!-- INSERT EMPLOYEE -->
     <?php if ($crud_section == 'insert_emp' || (!isset($_GET['crud']))): ?>
     <form method="POST" action="?tab=crud&crud=insert_emp" onsubmit="return validate_emp_form();">
         <input type="hidden" name="action" value="insert_emp">
@@ -619,7 +604,7 @@ if ($action_msg != '') {
     </form>
     <?php endif; ?>
 
-    <!-- ------ INSERT DEPARTMENT FORM ------ -->
+    <!-- INSERT DEPARTMENT -->
     <?php if ($crud_section == 'insert_dept'): ?>
     <form method="POST" action="?tab=crud&crud=insert_dept">
         <input type="hidden" name="action" value="insert_dept">
@@ -641,10 +626,9 @@ if ($action_msg != '') {
     </form>
     <?php endif; ?>
 
-    <!-- ------ UPDATE EMPLOYEE FORM ------ -->
+    <!-- UPDATE EMPLOYEE -->
     <?php if ($crud_section == 'update'): ?>
     <div>
-        <!-- Step 1: Enter employee ID to load their current data -->
         <form method="GET" action="">
             <input type="hidden" name="tab"  value="crud">
             <input type="hidden" name="crud" value="update">
@@ -660,7 +644,6 @@ if ($action_msg != '') {
         </form>
 
         <?php if ($update_emp): ?>
-        <!-- Step 2: Show pre-filled form once employee is loaded -->
         <hr class="divider">
         <form method="POST" action="?tab=crud&crud=update" onsubmit="return validate_update_form();">
             <input type="hidden" name="action" value="update_emp">
@@ -672,30 +655,25 @@ if ($action_msg != '') {
                 </div>
                 <div class="form-group">
                     <label>Name *</label>
-                    <input type="text" name="ename" required
-                           value="<?php echo htmlspecialchars($update_emp['ENAME']); ?>">
+                    <input type="text" name="ename" required value="<?php echo htmlspecialchars($update_emp['ENAME']); ?>">
                 </div>
                 <div class="form-group">
                     <label>Job</label>
-                    <input type="text" name="job"
-                           value="<?php echo htmlspecialchars($update_emp['JOB'] ?? ''); ?>">
+                    <input type="text" name="job" value="<?php echo htmlspecialchars($update_emp['JOB'] ?? ''); ?>">
                 </div>
             </div>
             <div class="form-row">
                 <div class="form-group">
                     <label>Salary *</label>
-                    <input type="number" step="0.01" name="sal" required
-                           value="<?php echo htmlspecialchars($update_emp['SAL']); ?>">
+                    <input type="number" step="0.01" name="sal" required value="<?php echo htmlspecialchars($update_emp['SAL']); ?>">
                 </div>
                 <div class="form-group">
                     <label>Commission</label>
-                    <input type="number" step="0.01" name="comm"
-                           value="<?php echo htmlspecialchars($update_emp['COMM'] ?? ''); ?>">
+                    <input type="number" step="0.01" name="comm" value="<?php echo htmlspecialchars($update_emp['COMM'] ?? ''); ?>">
                 </div>
                 <div class="form-group">
                     <label>DeptNo</label>
-                    <input type="number" name="deptno"
-                           value="<?php echo htmlspecialchars($update_emp['DEPTNO'] ?? ''); ?>">
+                    <input type="number" name="deptno" value="<?php echo htmlspecialchars($update_emp['DEPTNO'] ?? ''); ?>">
                 </div>
             </div>
             <button type="submit" class="btn btn-warning">Update Employee</button>
@@ -706,10 +684,9 @@ if ($action_msg != '') {
     </div>
     <?php endif; ?>
 
-    <!-- ------ DELETE EMPLOYEE FORM ------ -->
+    <!-- DELETE EMPLOYEE -->
     <?php if ($crud_section == 'delete'): ?>
-    <form method="POST" action="?tab=crud&crud=delete"
-          onsubmit="return confirm_delete();">
+    <form method="POST" action="?tab=crud&crud=delete" onsubmit="return confirm_delete();">
         <input type="hidden" name="action" value="delete_emp">
         <div class="form-row">
             <div class="form-group" style="max-width:200px;">
@@ -724,7 +701,7 @@ if ($action_msg != '') {
     </form>
     <?php endif; ?>
 
-    <!-- ------ QUERY / SEARCH FORM ------ -->
+    <!-- QUERY / SEARCH -->
     <?php if ($crud_section == 'query'): ?>
     <form method="GET" action="">
         <input type="hidden" name="tab"  value="crud">
@@ -755,7 +732,6 @@ if ($action_msg != '') {
     </form>
 
     <?php
-    // Run the user's custom query if all fields are filled
     if (isset($_GET['q_table'], $_GET['q_col'], $_GET['q_val'])
         && $_GET['q_col'] != '' && $_GET['q_val'] != '') {
 
@@ -783,13 +759,8 @@ if ($action_msg != '') {
 
 </div><!-- end .container -->
 
-<!-- =============================================
-     JAVASCRIPT â€” validation and confirmations
-     Using concepts from Lecture 5
-============================================= -->
 <script type="text/javascript">
 
-/* Validate the employee search form â€” ID must not be empty */
 function validate_search() {
     var emp_id = document.getElementById('search_id').value;
     if (emp_id == '' || emp_id <= 0) {
@@ -799,11 +770,9 @@ function validate_search() {
     return true;
 }
 
-/* Validate insert employee form â€” salary must be >= 0 */
 function validate_emp_form() {
     var sal = document.getElementsByName('sal')[0].value;
     var nm  = document.getElementsByName('ename')[0].value;
-
     if (nm.trim() == '') {
         alert('Employee name cannot be empty.');
         return false;
@@ -815,11 +784,9 @@ function validate_emp_form() {
     return true;
 }
 
-/* Validate the update form â€” name and salary required */
 function validate_update_form() {
     var nm  = document.getElementsByName('ename')[0].value;
     var sal = document.getElementsByName('sal')[0].value;
-
     if (nm.trim() == '') {
         alert('Name cannot be empty for update.');
         return false;
@@ -831,7 +798,6 @@ function validate_update_form() {
     return true;
 }
 
-/* Confirm before deleting â€” prevents accidental deletes */
 function confirm_delete() {
     var id = document.getElementsByName('del_empno')[0].value;
     if (id == '') {
