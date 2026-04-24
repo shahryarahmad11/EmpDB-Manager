@@ -2,299 +2,768 @@
 /*
  * dashboard.php
  * User & admin dashboard for EmpDB Manager.
- * Handles: profile, password change, user management (admin), activity log (admin).
- *
- * Project by Shahryar Ahmad
+ * Updated: Open DB Manager button, Activity Log tab fix, Block/Unblock users.
  */
 require_once 'auth.php';
 require_once 'conn.php';
 require_once 'Functions.php';
 
-$is_admin = ($_SESSION['user_role'] === 'admin');
+$is_admin = $_SESSION['user_role'] === 'admin';
 $users    = array();
 $stats    = array();
 $msg      = '';
-$msg_type = '';
+$msgtype  = '';
 
-/* -----------------------------------------------
-   ADMIN: Delete user
------------------------------------------------ */
+/* ── Handle actions ── */
+
+// Delete user (admin only)
 if ($is_admin && isset($_GET['delete_user'])) {
-    $del_id = (int)$_GET['delete_user'];
-    if ($del_id !== (int)$_SESSION['user_id']) {
-        // Grab name before deleting for the log
-        $c   = get_connection();
-        $res = sqlsrv_query($c, "SELECT FullName, Email FROM Users WHERE UserID = ?", array($del_id));
-        $du  = $res ? sqlsrv_fetch_array($res, SQLSRV_FETCH_ASSOC) : null;
-
-        sqlsrv_query($c, "DELETE FROM Users WHERE UserID = ?", array($del_id));
+    $delid = (int)$_GET['delete_user'];
+    if ($delid !== (int)$_SESSION['user_id']) {
+        $c = get_connection();
+        sqlsrv_query($c, "DELETE FROM Users WHERE UserID = ?", array($delid));
         sqlsrv_close($c);
-
-        if ($du) {
-            write_activity_log('DELETE_USER',
-                "Deleted user: {$du['FullName']} (Email: {$du['Email']}, UserID: $del_id)"
-            );
-        }
-        $msg      = "User deleted successfully.";
-        $msg_type = 'success';
+        log_activity('DELETE_USER', "Deleted user UserID=$delid");
+        $msg = "User deleted successfully.";
+        $msgtype = 'success';
     }
 }
 
-/* -----------------------------------------------
-   ADMIN: Promote / demote user
------------------------------------------------ */
+// Promote / demote user (admin only)
 if ($is_admin && isset($_GET['promote'])) {
     $pid  = (int)$_GET['promote'];
-    $role = (isset($_GET['role']) && $_GET['role'] === 'admin') ? 'admin' : 'user';
-
+    $role = ($_GET['role'] ?? '') === 'admin' ? 'admin' : 'user';
     if ($pid !== (int)$_SESSION['user_id']) {
-        $c   = get_connection();
-        $res = sqlsrv_query($c, "SELECT FullName FROM Users WHERE UserID = ?", array($pid));
-        $pu  = $res ? sqlsrv_fetch_array($res, SQLSRV_FETCH_ASSOC) : null;
-
+        $c = get_connection();
         sqlsrv_query($c, "UPDATE Users SET Role = ? WHERE UserID = ?", array($role, $pid));
         sqlsrv_close($c);
-
-        $label = ($role === 'admin') ? 'Promoted to Admin' : 'Demoted to User';
-        write_activity_log('UPDATE_ROLE',
-            "$label: " . ($pu ? $pu['FullName'] : "UserID=$pid")
-        );
-        $msg      = "User role updated.";
-        $msg_type = 'success';
+        log_activity('CHANGE_ROLE', "Changed UserID=$pid to role=$role");
+        $msg = "User role updated.";
+        $msgtype = 'success';
     }
 }
 
-/* -----------------------------------------------
-   ADMIN: Block / unblock user
------------------------------------------------ */
-if ($is_admin && isset($_GET['toggle_block'])) {
-    $bid = (int)$_GET['toggle_block'];
+// Block user (admin only)
+if ($is_admin && isset($_GET['block_user'])) {
+    $bid = (int)$_GET['block_user'];
     if ($bid !== (int)$_SESSION['user_id']) {
-        $c   = get_connection();
-        $res = sqlsrv_query($c, "SELECT FullName, IsBlocked FROM Users WHERE UserID = ?", array($bid));
-        $bu  = $res ? sqlsrv_fetch_array($res, SQLSRV_FETCH_ASSOC) : null;
-
-        if ($bu) {
-            $new_block = empty($bu['IsBlocked']) ? 1 : 0;
-            sqlsrv_query($c, "UPDATE Users SET IsBlocked = ? WHERE UserID = ?", array($new_block, $bid));
-            $action_label = $new_block ? 'BLOCK_USER' : 'UNBLOCK_USER';
-            $detail_label = $new_block ? 'Blocked' : 'Unblocked';
-            write_activity_log($action_label, "$detail_label user: {$bu['FullName']} (UserID=$bid)");
-            $msg      = "User " . strtolower($detail_label) . " successfully.";
-            $msg_type = 'success';
-        }
+        $c = get_connection();
+        sqlsrv_query(
+            $c,
+            "UPDATE Users SET IsBlocked = 1, BlockReason = ?, BlockedAt = GETDATE(), BlockedBy = ? WHERE UserID = ?",
+            array('Blocked by admin', $_SESSION['user_id'], $bid)
+        );
         sqlsrv_close($c);
+        log_activity('BLOCK_USER', "Blocked UserID=$bid");
+        $msg = "User blocked successfully.";
+        $msgtype = 'success';
     }
 }
 
-/* -----------------------------------------------
-   Change password
------------------------------------------------ */
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'change_password') {
-    $old = $_POST['old_password']     ?? '';
-    $new = $_POST['new_password']     ?? '';
-    $cnf = $_POST['confirm_password'] ?? '';
+// Unblock user (admin only)
+if ($is_admin && isset($_GET['unblock_user'])) {
+    $uid = (int)$_GET['unblock_user'];
+    if ($uid !== (int)$_SESSION['user_id']) {
+        $c = get_connection();
+        sqlsrv_query($c, "UPDATE Users SET IsBlocked = 0, BlockReason = NULL, BlockedAt = NULL, BlockedBy = NULL WHERE UserID = ?", array($uid));
+        sqlsrv_close($c);
+        log_activity('UNBLOCK_USER', "Unblocked UserID=$uid");
+        $msg = "User unblocked successfully.";
+        $msgtype = 'success';
+    }
+}
 
-    if (
-        strlen($new) < 8 ||
-        !preg_match('/[A-Z]/', $new) ||
-        !preg_match('/[0-9]/', $new)
-    ) {
-        $msg      = "New password must be 8+ chars with 1 uppercase and 1 number.";
-        $msg_type = 'error';
+// Change password
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'change_password') {
+    $old = $_POST['old_password'];
+    $new = $_POST['new_password'];
+    $cnf = $_POST['confirm_password'];
+
+    if (strlen($new) < 8 || !preg_match('/[A-Z]/', $new) || !preg_match('/[0-9]/', $new)) {
+        $msg = "New password must be 8+ chars with 1 uppercase and 1 number.";
+        $msgtype = 'error';
     } elseif ($new !== $cnf) {
-        $msg      = "New passwords do not match.";
-        $msg_type = 'error';
+        $msg = "New passwords do not match.";
+        $msgtype = 'error';
     } else {
         $c   = get_connection();
         $res = sqlsrv_query($c, "SELECT Password FROM Users WHERE UserID = ?", array($_SESSION['user_id']));
-        $row = $res ? sqlsrv_fetch_array($res, SQLSRV_FETCH_ASSOC) : null;
-
+        $row = sqlsrv_fetch_array($res, SQLSRV_FETCH_ASSOC);
         if ($row && password_verify($old, $row['Password'])) {
             $hash = password_hash($new, PASSWORD_BCRYPT);
             sqlsrv_query($c, "UPDATE Users SET Password = ? WHERE UserID = ?", array($hash, $_SESSION['user_id']));
-            write_activity_log('CHANGE_PASSWORD', 'User changed their account password.');
-            $msg      = "Password changed successfully!";
-            $msg_type = 'success';
+            log_activity('CHANGE_PASSWORD', 'User changed their password');
+            $msg = "Password changed successfully!";
+            $msgtype = 'success';
         } else {
-            $msg      = "Current password is incorrect.";
-            $msg_type = 'error';
+            $msg = "Current password is incorrect.";
+            $msgtype = 'error';
         }
         sqlsrv_close($c);
     }
 }
 
-/* -----------------------------------------------
-   Update profile
------------------------------------------------ */
+// Update profile
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'update_profile') {
-    $fn   = trim($_POST['fullname']   ?? '');
-    $city = trim($_POST['city']       ?? '');
-    $uni  = trim($_POST['university'] ?? '');
-
+    $fn   = trim($_POST['fullname']);
+    $city = trim($_POST['city']);
+    $uni  = trim($_POST['university']);
     if ($fn && $city && $uni) {
         $c = get_connection();
-        sqlsrv_query($c,
-            "UPDATE Users SET FullName = ?, City = ?, University = ? WHERE UserID = ?",
-            array($fn, $city, $uni, $_SESSION['user_id'])
-        );
+        sqlsrv_query($c, "UPDATE Users SET FullName=?, City=?, University=? WHERE UserID=?", array($fn, $city, $uni, $_SESSION['user_id']));
         sqlsrv_close($c);
-
         $_SESSION['user_name'] = $fn;
-        write_activity_log('UPDATE_PROFILE',
-            "Updated profile — FullName: $fn, City: $city, University: $uni"
-        );
-        $msg      = "Profile updated!";
-        $msg_type = 'success';
+        log_activity('UPDATE_PROFILE', "Profile updated: FullName=$fn");
+        $msg = "Profile updated!";
+        $msgtype = 'success';
     } else {
-        $msg      = "All fields are required.";
-        $msg_type = 'error';
+        $msg = "All fields required.";
+        $msgtype = 'error';
     }
 }
 
-/* -----------------------------------------------
-   Load data
------------------------------------------------ */
+/* ── Load data ── */
 $c       = get_connection();
 $res     = sqlsrv_query($c, "SELECT * FROM Users WHERE UserID = ?", array($_SESSION['user_id']));
-$profile = $res ? sqlsrv_fetch_array($res, SQLSRV_FETCH_ASSOC) : null;
+$profile = sqlsrv_fetch_array($res, SQLSRV_FETCH_ASSOC);
 
 if ($is_admin) {
     $r = sqlsrv_query($c, "SELECT COUNT(*) AS cnt FROM EMP");
-    $stats['employees']   = $r ? sqlsrv_fetch_array($r, SQLSRV_FETCH_ASSOC)['cnt'] : 0;
+    $stats['employees'] = sqlsrv_fetch_array($r, SQLSRV_FETCH_ASSOC)['cnt'];
 
     $r = sqlsrv_query($c, "SELECT COUNT(*) AS cnt FROM DEPT");
-    $stats['departments'] = $r ? sqlsrv_fetch_array($r, SQLSRV_FETCH_ASSOC)['cnt'] : 0;
+    $stats['departments'] = sqlsrv_fetch_array($r, SQLSRV_FETCH_ASSOC)['cnt'];
 
     $r = sqlsrv_query($c, "SELECT COUNT(*) AS cnt FROM Project");
-    $stats['projects']    = $r ? sqlsrv_fetch_array($r, SQLSRV_FETCH_ASSOC)['cnt'] : 0;
+    $stats['projects'] = sqlsrv_fetch_array($r, SQLSRV_FETCH_ASSOC)['cnt'];
 
     $r = sqlsrv_query($c, "SELECT COUNT(*) AS cnt FROM Users");
-    $stats['users']       = $r ? sqlsrv_fetch_array($r, SQLSRV_FETCH_ASSOC)['cnt'] : 0;
+    $stats['users'] = sqlsrv_fetch_array($r, SQLSRV_FETCH_ASSOC)['cnt'];
 
     $r = sqlsrv_query($c, "SELECT AVG(SAL) AS avg FROM EMP");
-    $stats['avg_sal']     = $r ? round(sqlsrv_fetch_array($r, SQLSRV_FETCH_ASSOC)['avg'], 2) : 0;
+    $stats['avg_sal'] = round(sqlsrv_fetch_array($r, SQLSRV_FETCH_ASSOC)['avg'] ?? 0, 2);
 
-    $res2 = sqlsrv_query($c,
-        "SELECT UserID, FullName, Email, City, University, Role, IsBlocked, CreatedAt
-         FROM Users ORDER BY CreatedAt DESC"
-    );
+    // Chart: employees per department
+    $dept_chart_labels = array(); $dept_chart_data = array();
+    $r = sqlsrv_query($c, "SELECT D.DNAME, COUNT(E.EMPNO) AS cnt FROM DEPT D LEFT JOIN EMP E ON D.DEPTNO = E.DEPTNO GROUP BY D.DNAME ORDER BY cnt DESC");
+    if ($r) { while ($row = sqlsrv_fetch_array($r, SQLSRV_FETCH_ASSOC)) { $dept_chart_labels[] = $row['DNAME']; $dept_chart_data[] = (int)$row['cnt']; } }
+
+    // Chart: avg salary per department
+    $sal_chart_labels = array(); $sal_chart_data = array();
+    $r = sqlsrv_query($c, "SELECT D.DNAME, ISNULL(AVG(E.SAL),0) AS avg_sal FROM DEPT D LEFT JOIN EMP E ON D.DEPTNO = E.DEPTNO GROUP BY D.DNAME ORDER BY avg_sal DESC");
+    if ($r) { while ($row = sqlsrv_fetch_array($r, SQLSRV_FETCH_ASSOC)) { $sal_chart_labels[] = $row['DNAME']; $sal_chart_data[] = round((float)$row['avg_sal'], 2); } }
+
+    // Chart: top 6 earners
+    $top_emp_names = array(); $top_emp_sals = array();
+    $r = sqlsrv_query($c, "SELECT TOP 6 ENAME, SAL FROM EMP WHERE SAL IS NOT NULL ORDER BY SAL DESC");
+    if ($r) { while ($row = sqlsrv_fetch_array($r, SQLSRV_FETCH_ASSOC)) { $top_emp_names[] = $row['ENAME']; $top_emp_sals[] = (float)$row['SAL']; } }
+
+    // Chart: job distribution
+    $job_labels = array(); $job_data = array();
+    $r = sqlsrv_query($c, "SELECT JOB, COUNT(*) AS cnt FROM EMP WHERE JOB IS NOT NULL GROUP BY JOB ORDER BY cnt DESC");
+    if ($r) { while ($row = sqlsrv_fetch_array($r, SQLSRV_FETCH_ASSOC)) { $job_labels[] = $row['JOB']; $job_data[] = (int)$row['cnt']; } }
+
+    $res2 = sqlsrv_query($c, "SELECT UserID, FullName, Email, City, University, Role, IsBlocked, CreatedAt FROM Users ORDER BY CreatedAt DESC");
     while ($row = sqlsrv_fetch_array($res2, SQLSRV_FETCH_ASSOC)) {
         $users[] = $row;
     }
+}
+sqlsrv_close($c);
 
-    // Activity log (latest 100)
-    $activity_rows = array();
-    $act_res = sqlsrv_query($c,
-        "SELECT TOP 100 UserName, Action, Details, IPAddress, LogTime
-         FROM ActivityLog ORDER BY LogTime DESC"
-    );
-    if ($act_res) {
-        while ($ar = sqlsrv_fetch_array($act_res, SQLSRV_FETCH_ASSOC)) {
-            $activity_rows[] = $ar;
-        }
-    }
+// Activity log
+$log_filter_action = isset($_GET['log_action']) ? $_GET['log_action'] : '';
+$log_filter_user   = isset($_GET['log_user']) ? $_GET['log_user'] : '';
+$activity_log      = get_activity_log(200, $log_filter_action, $log_filter_user);
+
+// Greeting
+$first_name = explode(' ', $_SESSION['user_name'])[0];
+$hour = (int)date('H');
+if ($hour < 12) {
+    $greeting = 'Good morning';
+} elseif ($hour < 17) {
+    $greeting = 'Good afternoon';
+} else {
+    $greeting = 'Good evening';
 }
 
-sqlsrv_close($c);
+// Determine initial tab
+$initial_tab = isset($_GET['tab']) ? $_GET['tab'] : 'home';
+$allowed_tabs = $is_admin
+    ? array('home', 'stats', 'users', 'log', 'profile', 'password')
+    : array('home', 'log', 'profile', 'password');
+if (!in_array($initial_tab, $allowed_tabs)) {
+    $initial_tab = 'home';
+}
 ?>
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Dashboard - EmpDB Manager</title>
+    <title>Dashboard — EmpDB Manager</title>
     <style>
-        *{box-sizing:border-box;margin:0;padding:0}
-        body{background:#0f1117;color:#e5e7eb;font-family:Segoe UI,sans-serif;min-height:100vh}
-        nav{background:#1a1d27;border-bottom:1px solid #2a2d3e;padding:0 2rem;display:flex;align-items:center;justify-content:space-between;height:60px;position:sticky;top:0;z-index:100}
-        .nav-brand{font-size:1.2rem;font-weight:700;color:#fff}.nav-brand span{color:#6366f1}
-        .nav-right{display:flex;align-items:center;gap:1rem;flex-wrap:wrap}
-        .nav-user{font-size:.875rem;color:#9ca3af}.nav-user strong{color:#fff}
-        .badge{display:inline-block;padding:.15rem .5rem;border-radius:20px;font-size:.7rem;font-weight:700;text-transform:uppercase;letter-spacing:.5px}
-        .badge-admin{background:rgba(99,102,241,.2);color:#a5b4fc;border:1px solid rgba(99,102,241,.3)}
-        .badge-user{background:rgba(34,197,94,.15);color:#4ade80;border:1px solid rgba(34,197,94,.3)}
-        .btn-logout{padding:.4rem 1rem;background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.3);color:#f87171;border-radius:6px;font-size:.875rem;font-weight:600;text-decoration:none}
-        .btn-logout:hover{background:rgba(239,68,68,.2)}
-        .tab-bar{background:#1a1d27;border-bottom:1px solid #2a2d3e;display:flex;gap:0;padding:0 2rem;overflow-x:auto}
-        .tab{padding:.85rem 1.25rem;font-size:.875rem;font-weight:600;color:#6b7280;cursor:pointer;border-bottom:2px solid transparent;transition:all .2s;background:none;border-top:none;border-left:none;border-right:none;white-space:nowrap}
-        .tab:hover{color:#e5e7eb}.tab.active{color:#6366f1;border-bottom-color:#6366f1}
-        .main{max-width:1100px;margin:0 auto;padding:2rem 1.5rem}
-        .tab-content{display:none}.tab-content.active{display:block}
-        .welcome-card{background:linear-gradient(135deg,#1e1b4b,#1a1d27);border:1px solid #3730a3;border-radius:16px;padding:2rem;margin-bottom:2rem;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:1rem}
-        .welcome-card h2{font-size:1.4rem;font-weight:700;color:#fff}
-        .welcome-card p{color:#a5b4fc;font-size:.9rem;margin-top:.3rem}
-        .btn-primary{padding:.75rem 1.5rem;background:#6366f1;color:#fff;border-radius:8px;font-size:.95rem;font-weight:600;text-decoration:none;transition:background .2s;display:inline-block;border:none;cursor:pointer}
-        .btn-primary:hover{background:#4f46e5}
-        .stats-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:1rem;margin-bottom:2rem}
-        .stat-card{background:#1a1d27;border:1px solid #2a2d3e;border-radius:12px;padding:1.25rem;text-align:center}
-        .stat-icon{font-size:1.8rem;margin-bottom:.5rem}
-        .stat-value{font-size:1.8rem;font-weight:800;color:#fff}
-        .stat-label{font-size:.75rem;color:#6b7280;text-transform:uppercase;letter-spacing:.5px;margin-top:.25rem}
-        .info-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:1rem;margin-bottom:2rem}
-        .info-card{background:#1a1d27;border:1px solid #2a2d3e;border-radius:12px;padding:1.25rem}
-        .info-card .label{font-size:.75rem;color:#6b7280;text-transform:uppercase;letter-spacing:.5px;margin-bottom:.4rem}
-        .info-card .value{font-size:1rem;color:#fff;font-weight:600}
-        .section-title{font-size:1.1rem;font-weight:700;color:#fff;margin-bottom:1rem;padding-bottom:.5rem;border-bottom:1px solid #2a2d3e;margin-top:1.5rem}
-        .table-wrap{overflow-x:auto;border-radius:12px;border:1px solid #2a2d3e}
-        table{width:100%;border-collapse:collapse;font-size:.875rem}
-        thead tr{background:#12141e}
-        th{color:#9ca3af;font-size:.75rem;text-transform:uppercase;letter-spacing:.5px;padding:.75rem 1rem;text-align:left}
-        td{padding:.85rem 1rem;border-bottom:1px solid #1f2232;color:#d1d5db}
-        tr:last-child td{border-bottom:none}
-        tr:hover td{background:#1f2232}
-        .form-card{background:#1a1d27;border:1px solid #2a2d3e;border-radius:16px;padding:2rem;max-width:480px}
-        .form-group{margin-bottom:1.2rem}
-        .form-group label{display:block;font-size:.8rem;font-weight:600;color:#9ca3af;margin-bottom:.4rem;text-transform:uppercase;letter-spacing:.5px}
-        .form-group input[type=text],.form-group input[type=email],.form-group input[type=password]{width:100%;padding:.75rem 1rem;background:#0f1117;border:1px solid #2a2d3e;border-radius:8px;color:#fff;font-size:.95rem;outline:none;transition:border-color .2s,box-shadow .2s}
-        .form-group input:focus{border-color:#6366f1;box-shadow:0 0 0 3px rgba(99,102,241,.15)}
-        .alert{padding:.85rem 1rem;border-radius:8px;font-size:.875rem;margin-bottom:1.5rem}
-        .alert-success{background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.3);color:#4ade80}
-        .alert-error{background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.3);color:#f87171}
-        .btn-sm{padding:.3rem .75rem;border-radius:6px;font-size:.75rem;font-weight:600;text-decoration:none;cursor:pointer;border:none;display:inline-block}
-        .btn-delete{background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.3);color:#f87171}
-        .btn-delete:hover{background:rgba(239,68,68,.2)}
-        .btn-promote{background:rgba(99,102,241,.15);border:1px solid rgba(99,102,241,.3);color:#a5b4fc}
-        .btn-promote:hover{background:rgba(99,102,241,.25)}
-        .btn-demote{background:rgba(251,191,36,.1);border:1px solid rgba(251,191,36,.3);color:#fbbf24}
-        .btn-demote:hover{background:rgba(251,191,36,.2)}
-        .btn-block{background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.3);color:#f87171}
-        .btn-block:hover{background:rgba(239,68,68,.2)}
-        .btn-unblock{background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.3);color:#4ade80}
-        .btn-unblock:hover{background:rgba(34,197,94,.2)}
-        .self-tag{color:#6b7280;font-size:.75rem;font-style:italic}
-        .action-group{display:flex;gap:.4rem;flex-wrap:wrap}
-        /* Activity log styles */
-        .log-badge{display:inline-block;padding:.15rem .55rem;border-radius:20px;font-size:.7rem;font-weight:700;letter-spacing:.4px;text-transform:uppercase}
-        .log-LOGIN,.log-AUTO_LOGIN,.log-SESSION_RESTORED{background:rgba(34,197,94,.12);color:#4ade80;border:1px solid rgba(34,197,94,.25)}
-        .log-LOGOUT{background:rgba(156,163,175,.1);color:#9ca3af;border:1px solid rgba(156,163,175,.2)}
-        .log-SIGNUP{background:rgba(99,102,241,.15);color:#a5b4fc;border:1px solid rgba(99,102,241,.3)}
-        .log-INSERT_EMP,.log-INSERT_DEPT{background:rgba(16,185,129,.12);color:#6ee7b7;border:1px solid rgba(16,185,129,.25)}
-        .log-UPDATE_EMP,.log-UPDATE_PROFILE,.log-UPDATE_ROLE{background:rgba(245,158,11,.1);color:#fcd34d;border:1px solid rgba(245,158,11,.25)}
-        .log-DELETE_EMP,.log-DELETE_USER{background:rgba(239,68,68,.1);color:#f87171;border:1px solid rgba(239,68,68,.25)}
-        .log-CHANGE_PASSWORD{background:rgba(139,92,246,.1);color:#c4b5fd;border:1px solid rgba(139,92,246,.25)}
-        .log-BLOCK_USER{background:rgba(239,68,68,.12);color:#fca5a5;border:1px solid rgba(239,68,68,.3)}
-        .log-UNBLOCK_USER{background:rgba(34,197,94,.1);color:#86efac;border:1px solid rgba(34,197,94,.2)}
-        .log-SEARCH_EMP,.log-VIEW_TABLE,.log-FULL_JOIN_VIEW{background:rgba(59,130,246,.1);color:#93c5fd;border:1px solid rgba(59,130,246,.2)}
-        .log-EXPORT_CSV{background:rgba(20,184,166,.1);color:#5eead4;border:1px solid rgba(20,184,166,.2)}
-        .log-LOGIN_FAILED,.log-LOGIN_BLOCKED,.log-SIGNUP_FAILED,.log-SESSION_RESTORE_BLOCKED,.log-AUTO_LOGIN_BLOCKED{background:rgba(239,68,68,.15);color:#fca5a5;border:1px solid rgba(239,68,68,.3)}
-        .log-default{background:rgba(107,114,128,.1);color:#9ca3af;border:1px solid rgba(107,114,128,.2)}
-        .log-filter-bar{display:flex;gap:.75rem;flex-wrap:wrap;margin-bottom:1rem;align-items:center}
-        .log-filter-bar input,.log-filter-bar select{background:#0f1117;border:1px solid #2a2d3e;border-radius:6px;color:#e5e7eb;padding:.5rem .85rem;font-size:.85rem;outline:none}
-        .log-filter-bar input:focus,.log-filter-bar select:focus{border-color:#6366f1}
-        .log-filter-bar button{padding:.5rem 1rem;background:#6366f1;color:#fff;border:none;border-radius:6px;font-size:.85rem;font-weight:600;cursor:pointer}
-        .log-filter-bar button:hover{background:#4f46e5}
-        .blocked-badge{display:inline-block;padding:.1rem .45rem;border-radius:10px;font-size:.65rem;font-weight:700;text-transform:uppercase;background:rgba(239,68,68,.15);color:#f87171;border:1px solid rgba(239,68,68,.3);margin-left:.3rem}
+        @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;400;600;700&display=swap');
+
+        :root {
+            --bg: #0f1117;
+            --surface: #1a1d27;
+            --surface2: #222639;
+            --border: #2e3350;
+            --accent: #6366f1;
+            --accent2: #7c5cfc;
+            --success: #3ecf8e;
+            --danger: #f46060;
+            --warning: #f5a623;
+            --text: #e2e8f0;
+            --dim: #8892a4;
+            --mono: 'IBM Plex Mono', monospace;
+            --sans: 'IBM Plex Sans', sans-serif;
+        }
+
+        * , *::before, *::after {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            background: var(--bg);
+            color: var(--text);
+            font-family: var(--sans);
+            font-size: 14px;
+            min-height: 100vh;
+        }
+
+        nav {
+            background: var(--surface);
+            border-bottom: 1px solid var(--border);
+            padding: 0 2rem;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            height: 60px;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+
+        .nav-brand {
+            font-size: 1.2rem;
+            font-weight: 700;
+            color: #fff;
+        }
+
+        .nav-brand span {
+            color: var(--accent);
+        }
+
+        .nav-right {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            flex-wrap: wrap;
+        }
+
+        .nav-user {
+            font-size: .875rem;
+            color: var(--dim);
+        }
+
+        .nav-user strong {
+            color: #fff;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: .15rem .5rem;
+            border-radius: 20px;
+            font-size: .7rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: .5px;
+        }
+
+        .badge-admin {
+            background: rgba(99,102,241,.2);
+            color: #a5b4fc;
+            border: 1px solid rgba(99,102,241,.3);
+        }
+
+        .badge-user {
+            background: rgba(34,197,94,.15);
+            color: #4ade80;
+            border: 1px solid rgba(34,197,94,.3);
+        }
+
+        .badge-blocked {
+            background: rgba(239,68,68,.15);
+            color: #f87171;
+            border: 1px solid rgba(239,68,68,.3);
+        }
+
+        .btn-logout {
+            padding: .4rem 1rem;
+            background: rgba(239,68,68,.1);
+            border: 1px solid rgba(239,68,68,.3);
+            color: #f87171;
+            border-radius: 6px;
+            font-size: .875rem;
+            font-weight: 600;
+            text-decoration: none;
+        }
+
+        .btn-logout:hover {
+            background: rgba(239,68,68,.2);
+        }
+
+        .tab-bar {
+            background: var(--surface);
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            gap: 0;
+            padding: 0 2rem;
+        }
+
+        .tab {
+            padding: .85rem 1.25rem;
+            font-size: .875rem;
+            font-weight: 600;
+            color: #6b7280;
+            cursor: pointer;
+            border-bottom: 2px solid transparent;
+            transition: all .2s;
+            background: none;
+            border-top: none;
+            border-left: none;
+            border-right: none;
+        }
+
+        .tab:hover {
+            color: var(--text);
+        }
+
+        .tab.active {
+            color: var(--accent);
+            border-bottom-color: var(--accent);
+        }
+
+        .main {
+            max-width: 1100px;
+            margin: 0 auto;
+            padding: 2rem 1.5rem;
+        }
+
+        .tab-content {
+            display: none;
+        }
+
+        .tab-content.active {
+            display: block;
+        }
+
+        .welcome-card {
+            background: linear-gradient(135deg, #1e1b4b, #1a1d27);
+            border: 1px solid #3730a3;
+            border-radius: 16px;
+            padding: 2rem;
+            margin-bottom: 2rem;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 1rem;
+        }
+
+        .welcome-card h2 {
+            font-size: 1.4rem;
+            font-weight: 700;
+            color: #fff;
+        }
+
+        .welcome-card p {
+            color: #a5b4fc;
+            font-size: .9rem;
+            margin-top: .3rem;
+        }
+
+        .btn-actions {
+            display: flex;
+            gap: .75rem;
+            flex-wrap: wrap;
+        }
+
+        .btn-primary {
+            padding: .75rem 1.5rem;
+            background: var(--accent);
+            color: #fff;
+            border-radius: 8px;
+            font-size: .95rem;
+            font-weight: 600;
+            text-decoration: none;
+            transition: background .2s;
+            display: inline-block;
+            border: none;
+            cursor: pointer;
+        }
+
+        .btn-primary:hover {
+            background: #4f46e5;
+        }
+
+        .btn-secondary {
+            padding: .75rem 1.5rem;
+            background: var(--surface2);
+            color: var(--text);
+            border-radius: 8px;
+            font-size: .95rem;
+            font-weight: 600;
+            text-decoration: none;
+            border: 1px solid var(--border);
+            display: inline-block;
+            transition: background .2s;
+            cursor: pointer;
+        }
+
+        .btn-secondary:hover {
+            background: var(--border);
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+            gap: 1rem;
+            margin-bottom: 2rem;
+        }
+
+        .stat-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 1.25rem;
+            text-align: center;
+        }
+
+        .stat-icon {
+            font-size: 1.8rem;
+            margin-bottom: .5rem;
+        }
+
+        .stat-value {
+            font-size: 1.8rem;
+            font-weight: 800;
+            color: #fff;
+        }
+
+        .stat-label {
+            font-size: .75rem;
+            color: #6b7280;
+            text-transform: uppercase;
+            letter-spacing: .5px;
+            margin-top: .25rem;
+        }
+
+        .info-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 1rem;
+            margin-bottom: 2rem;
+        }
+
+        .info-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 1.25rem;
+        }
+
+        .info-card .label {
+            font-size: .75rem;
+            color: var(--dim);
+            text-transform: uppercase;
+            letter-spacing: .5px;
+            margin-bottom: .4rem;
+        }
+
+        .info-card .value {
+            font-size: 1rem;
+            color: #fff;
+            font-weight: 600;
+        }
+
+        .section-title {
+            font-size: 1.1rem;
+            font-weight: 700;
+            color: #fff;
+            margin-bottom: 1rem;
+            padding-bottom: .5rem;
+            border-bottom: 1px solid var(--border);
+            margin-top: 1.5rem;
+        }
+
+        .table-wrap {
+            overflow-x: auto;
+            border-radius: 12px;
+            border: 1px solid var(--border);
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: .875rem;
+        }
+
+        thead tr {
+            background: var(--surface2);
+        }
+
+        th {
+            padding: .75rem 1rem;
+            text-align: left;
+            font-family: var(--mono);
+            font-size: .75rem;
+            font-weight: 600;
+            color: var(--dim);
+            text-transform: uppercase;
+            letter-spacing: .5px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        td {
+            padding: .85rem 1rem;
+            border-bottom: 1px solid var(--border);
+            color: #d1d5db;
+        }
+
+        tr:last-child td {
+            border-bottom: none;
+        }
+
+        tr:hover td {
+            background: var(--surface2);
+        }
+
+        .form-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 2rem;
+            max-width: 480px;
+        }
+
+        .form-group {
+            margin-bottom: 1.2rem;
+        }
+
+        label {
+            display: block;
+            font-size: .8rem;
+            font-weight: 600;
+            color: var(--dim);
+            margin-bottom: .4rem;
+            text-transform: uppercase;
+            letter-spacing: .5px;
+        }
+
+        input[type="text"],
+        input[type="email"],
+        input[type="password"] {
+            width: 100%;
+            padding: .75rem 1rem;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            color: #fff;
+            font-size: .95rem;
+            outline: none;
+            transition: border-color .2s, box-shadow .2s;
+        }
+
+        input:focus {
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px rgba(99,102,241,.15);
+        }
+
+        input::placeholder {
+            color: #4b5563;
+        }
+
+        input:disabled {
+            opacity: .5;
+            cursor: not-allowed;
+        }
+
+        .alert {
+            padding: .85rem 1rem;
+            border-radius: 8px;
+            font-size: .875rem;
+            margin-bottom: 1.5rem;
+        }
+
+        .alert-success {
+            background: rgba(34,197,94,.1);
+            border: 1px solid rgba(34,197,94,.3);
+            color: #4ade80;
+        }
+
+        .alert-error {
+            background: rgba(239,68,68,.1);
+            border: 1px solid rgba(239,68,68,.3);
+            color: #f87171;
+        }
+
+        .btn-sm {
+            padding: .3rem .75rem;
+            border-radius: 6px;
+            font-size: .75rem;
+            font-weight: 600;
+            text-decoration: none;
+            cursor: pointer;
+            border: none;
+            display: inline-block;
+        }
+
+        .btn-delete {
+            background: rgba(239,68,68,.1);
+            border: 1px solid rgba(239,68,68,.3);
+            color: #f87171;
+        }
+
+        .btn-delete:hover {
+            background: rgba(239,68,68,.2);
+        }
+
+        .btn-promote {
+            background: rgba(99,102,241,.15);
+            border: 1px solid rgba(99,102,241,.3);
+            color: #a5b4fc;
+        }
+
+        .btn-promote:hover {
+            background: rgba(99,102,241,.25);
+        }
+
+        .btn-demote {
+            background: rgba(251,191,36,.1);
+            border: 1px solid rgba(251,191,36,.3);
+            color: #fbbf24;
+        }
+
+        .btn-demote:hover {
+            background: rgba(251,191,36,.2);
+        }
+
+        .btn-warning {
+            background: rgba(245,166,35,.12);
+            border: 1px solid rgba(245,166,35,.3);
+            color: #fbbf24;
+        }
+
+        .btn-warning:hover {
+            background: rgba(245,166,35,.2);
+        }
+
+        .btn-success {
+            background: rgba(34,197,94,.12);
+            border: 1px solid rgba(34,197,94,.3);
+            color: #4ade80;
+        }
+
+        .btn-success:hover {
+            background: rgba(34,197,94,.2);
+        }
+
+        .self-tag {
+            color: #6b7280;
+            font-size: .75rem;
+            font-style: italic;
+        }
+
+        .action-group {
+            display: flex;
+            gap: .4rem;
+            flex-wrap: wrap;
+        }
+
+        .log-filters {
+            display: flex;
+            gap: 1rem;
+            flex-wrap: wrap;
+            align-items: flex-end;
+            margin-bottom: 1rem;
+        }
+
+        .log-filters select,
+        .log-filters input[type="text"] {
+            max-width: 180px;
+            padding: .5rem .75rem;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            color: var(--text);
+            font-size: .875rem;
+            outline: none;
+        }
+
+        .log-filters select:focus,
+        .log-filters input:focus {
+            border-color: var(--accent);
+        }
+
+        .action-badge {
+            display: inline-block;
+            padding: .15rem .5rem;
+            border-radius: 4px;
+            font-size: .7rem;
+            font-weight: 700;
+            letter-spacing: .5px;
+            font-family: var(--mono);
+        }
+
+        .action-INSERT_EMP      { background: rgba(62,207,142,.12); color: var(--success); }
+        .action-INSERT_DEPT     { background: rgba(62,207,142,.12); color: var(--success); }
+        .action-UPDATE_EMP      { background: rgba(245,166,35,.12); color: var(--warning); }
+        .action-UPDATE_PROFILE  { background: rgba(79,142,247,.12); color: #4f8ef7; }
+        .action-CHANGE_PASSWORD { background: rgba(124,92,252,.12); color: var(--accent2); }
+        .action-DELETE_EMP      { background: rgba(244,96,96,.12); color: var(--danger); }
+        .action-DELETE_USER     { background: rgba(244,96,96,.12); color: var(--danger); }
+        .action-CHANGE_ROLE     { background: rgba(245,166,35,.12); color: var(--warning); }
+        .action-BLOCK_USER      { background: rgba(244,96,96,.12); color: var(--danger); }
+        .action-UNBLOCK_USER    { background: rgba(62,207,142,.12); color: var(--success); }
+        .action-default         { background: rgba(136,146,164,.12); color: var(--dim); }
+
+        .charts-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1.5rem;
+            margin-top: 1.5rem;
+        }
+
+        .chart-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 1.5rem;
+        }
+
+        .chart-title {
+            font-size: .9rem;
+            font-weight: 600;
+            color: var(--dim);
+            margin-bottom: 1rem;
+        }
+
+        @media (max-width: 700px) {
+            .charts-grid { grid-template-columns: 1fr; }
+        }
     </style>
 </head>
 <body>
 
-<!-- NAV -->
 <nav>
     <div class="nav-brand">Emp<span>DB</span> Manager</div>
     <div class="nav-right">
         <div class="nav-user">
-            Welcome, <strong><?php echo htmlspecialchars($_SESSION['user_name']); ?></strong>
+            <?php echo htmlspecialchars($greeting); ?>, <strong><?php echo htmlspecialchars($first_name); ?></strong>
             <span class="badge <?php echo $is_admin ? 'badge-admin' : 'badge-user'; ?>">
                 <?php echo $is_admin ? 'Admin' : 'User'; ?>
             </span>
@@ -303,315 +772,321 @@ sqlsrv_close($c);
     </div>
 </nav>
 
-<!-- TABS -->
 <div class="tab-bar">
-    <button class="tab active" onclick="switchTab('home',this)">Home</button>
+    <button class="tab" data-tab="home" onclick="switchTab('home',this)">Home</button>
     <?php if ($is_admin): ?>
-    <button class="tab" onclick="switchTab('stats',this)">Stats</button>
-    <button class="tab" onclick="switchTab('users',this)">Users</button>
-    <button class="tab" onclick="switchTab('activity',this)">Activity Log</button>
+        <button class="tab" data-tab="stats" onclick="switchTab('stats',this)">Stats</button>
+        <button class="tab" data-tab="users" onclick="switchTab('users',this)">Users</button>
     <?php endif; ?>
-    <button class="tab" onclick="switchTab('profile',this)">Profile</button>
-    <button class="tab" onclick="switchTab('password',this)">Password</button>
+    <button class="tab" data-tab="log" onclick="switchTab('log',this)">Activity Log</button>
+    <button class="tab" data-tab="profile" onclick="switchTab('profile',this)">Profile</button>
+    <button class="tab" data-tab="password" onclick="switchTab('password',this)">Password</button>
 </div>
 
 <div class="main">
+    <?php if ($msg): ?>
+        <div class="alert alert-<?php echo $msgtype; ?>"><?php echo htmlspecialchars($msg); ?></div>
+    <?php endif; ?>
 
-<?php if ($msg): ?>
-    <div class="alert alert-<?php echo $msg_type; ?>"><?php echo htmlspecialchars($msg); ?></div>
-<?php endif; ?>
-
-<!-- HOME -->
-<div id="tab-home" class="tab-content active">
-    <div class="welcome-card">
-        <div>
-            <h2>👋 Welcome back, <?php echo htmlspecialchars(explode(' ', $_SESSION['user_name'])[0]); ?>!</h2>
-            <p>Logged in as <strong><?php echo htmlspecialchars($_SESSION['user_email']); ?></strong></p>
+    <div id="tab-home" class="tab-content">
+        <div class="welcome-card">
+            <div>
+                <h2>👋 <?php echo htmlspecialchars($greeting); ?>, <?php echo htmlspecialchars($first_name); ?>!</h2>
+                <p>Logged in as <strong><?php echo htmlspecialchars($_SESSION['user_email']); ?></strong></p>
+            </div>
+            <div class="btn-actions">
+                <a href="dbmanager.php" class="btn-primary">Open DB Manager</a>
+                <a href="#" class="btn-secondary" onclick="switchTab('log', document.querySelector('[data-tab=log]')); return false;">Activity Log</a>
+            </div>
         </div>
-        <a href="dbmanager.php" class="btn-primary">Open DB Manager</a>
+
+        <div class="info-grid">
+            <div class="info-card"><div class="label">Full Name</div><div class="value"><?php echo htmlspecialchars($_SESSION['user_name']); ?></div></div>
+            <div class="info-card"><div class="label">Email</div><div class="value"><?php echo htmlspecialchars($_SESSION['user_email']); ?></div></div>
+            <div class="info-card"><div class="label">Role</div><div class="value"><?php echo ucfirst($_SESSION['user_role']); ?></div></div>
+            <?php if ($profile): ?>
+                <div class="info-card"><div class="label">City</div><div class="value"><?php echo htmlspecialchars($profile['City'] ?? ''); ?></div></div>
+                <div class="info-card"><div class="label">University</div><div class="value"><?php echo htmlspecialchars($profile['University'] ?? ''); ?></div></div>
+            <?php endif; ?>
+        </div>
     </div>
 
-    <div class="info-grid">
-        <div class="info-card">
-            <div class="label">Full Name</div>
-            <div class="value"><?php echo htmlspecialchars($_SESSION['user_name']); ?></div>
+    <?php if ($is_admin): ?>
+    <div id="tab-stats" class="tab-content">
+        <!-- KPI Cards -->
+        <div class="stats-grid">
+            <div class="stat-card"><div class="stat-icon">👥</div><div class="stat-value"><?php echo $stats['employees']; ?></div><div class="stat-label">Employees</div></div>
+            <div class="stat-card"><div class="stat-icon">🏢</div><div class="stat-value"><?php echo $stats['departments']; ?></div><div class="stat-label">Departments</div></div>
+            <div class="stat-card"><div class="stat-icon">📁</div><div class="stat-value"><?php echo $stats['projects']; ?></div><div class="stat-label">Projects</div></div>
+            <div class="stat-card"><div class="stat-icon">🔐</div><div class="stat-value"><?php echo $stats['users']; ?></div><div class="stat-label">Registered Users</div></div>
+            <div class="stat-card"><div class="stat-icon">💰</div><div class="stat-value">$<?php echo number_format($stats['avg_sal'], 0); ?></div><div class="stat-label">Avg Salary</div></div>
         </div>
-        <div class="info-card">
-            <div class="label">Email</div>
-            <div class="value"><?php echo htmlspecialchars($_SESSION['user_email']); ?></div>
-        </div>
-        <div class="info-card">
-            <div class="label">Role</div>
-            <div class="value"><?php echo ucfirst($_SESSION['user_role']); ?></div>
-        </div>
-        <?php if ($profile): ?>
-        <div class="info-card">
-            <div class="label">City</div>
-            <div class="value"><?php echo htmlspecialchars($profile['City']); ?></div>
-        </div>
-        <div class="info-card">
-            <div class="label">University</div>
-            <div class="value"><?php echo htmlspecialchars($profile['University']); ?></div>
-        </div>
-        <?php endif; ?>
-    </div>
-</div>
 
-<!-- STATS (admin only) -->
-<?php if ($is_admin): ?>
-<div id="tab-stats" class="tab-content">
-    <div class="stats-grid">
-        <div class="stat-card"><div class="stat-icon">👥</div><div class="stat-value"><?php echo $stats['employees']; ?></div><div class="stat-label">Employees</div></div>
-        <div class="stat-card"><div class="stat-icon">🏢</div><div class="stat-value"><?php echo $stats['departments']; ?></div><div class="stat-label">Departments</div></div>
-        <div class="stat-card"><div class="stat-icon">📁</div><div class="stat-value"><?php echo $stats['projects']; ?></div><div class="stat-label">Projects</div></div>
-        <div class="stat-card"><div class="stat-icon">🧑‍💻</div><div class="stat-value"><?php echo $stats['users']; ?></div><div class="stat-label">Registered Users</div></div>
-        <div class="stat-card"><div class="stat-icon">💰</div><div class="stat-value">$<?php echo number_format($stats['avg_sal'], 0); ?></div><div class="stat-label">Avg Salary</div></div>
-    </div>
-</div>
+        <!-- Charts Grid -->
+        <div class="charts-grid">
 
-<!-- USERS (admin only) -->
-<div id="tab-users" class="tab-content">
-    <div class="section-title" style="margin-top:0">All Registered Users</div>
-    <div class="table-wrap">
-        <table>
-            <thead>
-                <tr>
-                    <th>#</th><th>Name</th><th>Email</th><th>City</th>
-                    <th>University</th><th>Role</th><th>Status</th><th>Registered</th><th>Actions</th>
-                </tr>
-            </thead>
-            <tbody>
-            <?php foreach ($users as $i => $u): ?>
-                <tr>
-                    <td><?php echo $i + 1; ?></td>
-                    <td>
-                        <?php echo htmlspecialchars($u['FullName']); ?>
-                        <?php if (!empty($u['IsBlocked'])): ?>
-                            <span class="blocked-badge">Blocked</span>
-                        <?php endif; ?>
-                    </td>
-                    <td><?php echo htmlspecialchars($u['Email']); ?></td>
-                    <td><?php echo htmlspecialchars($u['City']); ?></td>
-                    <td><?php echo htmlspecialchars($u['University']); ?></td>
-                    <td>
-                        <span class="badge <?php echo $u['Role'] === 'admin' ? 'badge-admin' : 'badge-user'; ?>">
-                            <?php echo ucfirst($u['Role']); ?>
-                        </span>
-                    </td>
-                    <td><?php echo empty($u['IsBlocked']) ? '<span style="color:#4ade80">Active</span>' : '<span style="color:#f87171">Blocked</span>'; ?></td>
-                    <td>
-                        <?php
-                        $d = $u['CreatedAt'];
-                        echo $d instanceof DateTime
-                            ? $d->format('Y-m-d')
-                            : htmlspecialchars((string)$d);
-                        ?>
-                    </td>
-                    <td>
-                        <?php if ($u['UserID'] !== $_SESSION['user_id']): ?>
-                        <div class="action-group">
-                            <?php if ($u['Role'] === 'user'): ?>
-                                <a href="?promote=<?php echo $u['UserID']; ?>&role=admin"
-                                   class="btn-sm btn-promote"
-                                   onclick="return confirm('Promote <?php echo htmlspecialchars($u['FullName']); ?> to Admin?')">Admin</a>
+            <div class="chart-card">
+                <div class="chart-title">👥 Employees per Department</div>
+                <canvas id="deptChart"></canvas>
+            </div>
+
+            <div class="chart-card">
+                <div class="chart-title">💼 Job Distribution</div>
+                <canvas id="jobChart"></canvas>
+            </div>
+
+            <div class="chart-card">
+                <div class="chart-title">💵 Avg Salary by Department</div>
+                <canvas id="salChart"></canvas>
+            </div>
+
+            <div class="chart-card">
+                <div class="chart-title">🏆 Top 6 Earners</div>
+                <canvas id="topEmpChart"></canvas>
+            </div>
+
+        </div>
+
+        <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+        <script>
+        Chart.defaults.color = '#8892a4';
+        Chart.defaults.borderColor = '#2e3350';
+        const C = ['#6366f1','#3ecf8e','#f5a623','#f46060','#7c5cfc','#38bdf8','#fb923c','#a78bfa'];
+
+        new Chart(document.getElementById('deptChart'), {
+            type: 'bar',
+            data: {
+                labels: <?php echo json_encode($dept_chart_labels); ?>,
+                datasets: [{ label: 'Employees', data: <?php echo json_encode($dept_chart_data); ?>, backgroundColor: C, borderRadius: 6, borderSkipped: false }]
+            },
+            options: { plugins: { legend: { display: false } }, scales: { x: { grid: { color: '#2e3350' } }, y: { grid: { color: '#2e3350' }, ticks: { stepSize: 1 } } } }
+        });
+
+        new Chart(document.getElementById('jobChart'), {
+            type: 'doughnut',
+            data: {
+                labels: <?php echo json_encode($job_labels); ?>,
+                datasets: [{ data: <?php echo json_encode($job_data); ?>, backgroundColor: C, borderWidth: 2, borderColor: '#1a1d27' }]
+            },
+            options: { plugins: { legend: { position: 'bottom', labels: { padding: 14, boxWidth: 12, color: '#8892a4' } } }, cutout: '62%' }
+        });
+
+        new Chart(document.getElementById('salChart'), {
+            type: 'bar',
+            data: {
+                labels: <?php echo json_encode($sal_chart_labels); ?>,
+                datasets: [{ label: 'Avg Salary ($)', data: <?php echo json_encode($sal_chart_data); ?>, backgroundColor: '#3ecf8e', borderRadius: 6, borderSkipped: false }]
+            },
+            options: { plugins: { legend: { display: false } }, scales: { x: { grid: { color: '#2e3350' } }, y: { grid: { color: '#2e3350' } } } }
+        });
+
+        new Chart(document.getElementById('topEmpChart'), {
+            type: 'bar',
+            data: {
+                labels: <?php echo json_encode($top_emp_names); ?>,
+                datasets: [{ label: 'Salary ($)', data: <?php echo json_encode($top_emp_sals); ?>, backgroundColor: '#7c5cfc', borderRadius: 6, borderSkipped: false }]
+            },
+            options: { indexAxis: 'y', plugins: { legend: { display: false } }, scales: { x: { grid: { color: '#2e3350' } }, y: { grid: { color: '#2e3350' } } } }
+        });
+        </script>
+    </div>
+
+        <div id="tab-users" class="tab-content">
+        <div class="section-title" style="margin-top:0">All Registered Users</div>
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>#</th>
+                        <th>Name</th>
+                        <th>Email</th>
+                        <th>City</th>
+                        <th>University</th>
+                        <th>Status</th>
+                        <th>Registered</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <?php foreach ($users as $i => $u): ?>
+                    <tr>
+                        <td><?php echo $i + 1; ?></td>
+                        <td><?php echo htmlspecialchars($u['FullName']); ?></td>
+                        <td><?php echo htmlspecialchars($u['Email']); ?></td>
+                        <td><?php echo htmlspecialchars($u['City'] ?? ''); ?></td>
+                        <td><?php echo htmlspecialchars($u['University'] ?? ''); ?></td>
+                        <td>
+                            <?php if (!empty($u['IsBlocked'])): ?>
+                                <span class="badge badge-blocked">Blocked</span>
                             <?php else: ?>
-                                <a href="?promote=<?php echo $u['UserID']; ?>&role=user"
-                                   class="btn-sm btn-demote"
-                                   onclick="return confirm('Demote <?php echo htmlspecialchars($u['FullName']); ?> to User?')">User</a>
+                                <span class="badge <?php echo $u['Role'] === 'admin' ? 'badge-admin' : 'badge-user'; ?>"><?php echo ucfirst($u['Role']); ?></span>
                             <?php endif; ?>
+                        </td>
+                        <td>
+                            <?php
+                            $d = $u['CreatedAt'];
+                            echo $d instanceof DateTime ? $d->format('Y-m-d') : htmlspecialchars((string)$d);
+                            ?>
+                        </td>
+                        <td>
+                            <?php if ($u['UserID'] !== $_SESSION['user_id']): ?>
+                                <div class="action-group">
+                                    <?php if ($u['Role'] === 'user'): ?>
+                                        <a href="?promote=<?php echo $u['UserID']; ?>&role=admin&tab=users" class="btn-sm btn-promote" onclick="return confirm('Promote to Admin?')">Admin</a>
+                                    <?php else: ?>
+                                        <a href="?promote=<?php echo $u['UserID']; ?>&role=user&tab=users" class="btn-sm btn-demote" onclick="return confirm('Demote to User?')">User</a>
+                                    <?php endif; ?>
 
-                            <?php if (empty($u['IsBlocked'])): ?>
-                                <a href="?toggle_block=<?php echo $u['UserID']; ?>"
-                                   class="btn-sm btn-block"
-                                   onclick="return confirm('Block <?php echo htmlspecialchars($u['FullName']); ?>?')">Block</a>
+                                    <?php if (!empty($u['IsBlocked'])): ?>
+                                        <a href="?unblock_user=<?php echo $u['UserID']; ?>&tab=users" class="btn-sm btn-success" onclick="return confirm('Unblock this user?')">Unblock</a>
+                                    <?php else: ?>
+                                        <a href="?block_user=<?php echo $u['UserID']; ?>&tab=users" class="btn-sm btn-warning" onclick="return confirm('Block this user?')">Block</a>
+                                    <?php endif; ?>
+
+                                    <a href="?delete_user=<?php echo $u['UserID']; ?>&tab=users" class="btn-sm btn-delete" onclick="return confirm('Delete <?php echo htmlspecialchars($u['FullName']); ?>?')">Delete</a>
+                                </div>
                             <?php else: ?>
-                                <a href="?toggle_block=<?php echo $u['UserID']; ?>"
-                                   class="btn-sm btn-unblock"
-                                   onclick="return confirm('Unblock <?php echo htmlspecialchars($u['FullName']); ?>?')">Unblock</a>
+                                <span class="self-tag">You</span>
                             <?php endif; ?>
-
-                            <a href="?delete_user=<?php echo $u['UserID']; ?>"
-                               class="btn-sm btn-delete"
-                               onclick="return confirm('Delete <?php echo htmlspecialchars($u['FullName']); ?>? This cannot be undone.')">Delete</a>
-                        </div>
-                        <?php else: ?>
-                            <span class="self-tag">You</span>
-                        <?php endif; ?>
-                    </td>
-                </tr>
-            <?php endforeach; ?>
-            </tbody>
-        </table>
-    </div>
-</div>
-
-<!-- ACTIVITY LOG (admin only) -->
-<div id="tab-activity" class="tab-content">
-    <div class="section-title" style="margin-top:0">Activity Log</div>
-
-    <div class="log-filter-bar">
-        <input type="text" id="log-search" placeholder="Search user or details..." oninput="filterLog()">
-        <select id="log-action-filter" onchange="filterLog()">
-            <option value="">All Actions</option>
-            <option value="LOGIN">LOGIN</option>
-            <option value="AUTO_LOGIN">AUTO_LOGIN</option>
-            <option value="SESSION_RESTORED">SESSION_RESTORED</option>
-            <option value="LOGOUT">LOGOUT</option>
-            <option value="SIGNUP">SIGNUP</option>
-            <option value="INSERT_EMP">INSERT_EMP</option>
-            <option value="UPDATE_EMP">UPDATE_EMP</option>
-            <option value="DELETE_EMP">DELETE_EMP</option>
-            <option value="INSERT_DEPT">INSERT_DEPT</option>
-            <option value="DELETE_USER">DELETE_USER</option>
-            <option value="UPDATE_ROLE">UPDATE_ROLE</option>
-            <option value="BLOCK_USER">BLOCK_USER</option>
-            <option value="UNBLOCK_USER">UNBLOCK_USER</option>
-            <option value="UPDATE_PROFILE">UPDATE_PROFILE</option>
-            <option value="CHANGE_PASSWORD">CHANGE_PASSWORD</option>
-            <option value="SEARCH_EMP">SEARCH_EMP</option>
-            <option value="VIEW_TABLE">VIEW_TABLE</option>
-            <option value="FULL_JOIN_VIEW">FULL_JOIN_VIEW</option>
-            <option value="EXPORT_CSV">EXPORT_CSV</option>
-            <option value="LOGIN_FAILED">LOGIN_FAILED</option>
-            <option value="LOGIN_BLOCKED">LOGIN_BLOCKED</option>
-            <option value="SIGNUP_FAILED">SIGNUP_FAILED</option>
-        </select>
-        <button onclick="clearLogFilter()">Clear</button>
-    </div>
-
-    <?php if (empty($activity_rows)): ?>
-        <p style="color:#6b7280;font-style:italic;padding:1rem 0">No activity recorded yet.</p>
-    <?php else: ?>
-    <div class="table-wrap">
-        <table id="log-table">
-            <thead>
-                <tr>
-                    <th>#</th>
-                    <th>User</th>
-                    <th>Action</th>
-                    <th>Details</th>
-                    <th>IP Address</th>
-                    <th>Time</th>
-                </tr>
-            </thead>
-            <tbody>
-            <?php foreach ($activity_rows as $ac => $row): ?>
-                <tr>
-                    <td><?php echo $ac + 1; ?></td>
-                    <td><?php echo htmlspecialchars($row['UserName']); ?></td>
-                    <td>
-                        <?php
-                        $action_key = htmlspecialchars($row['Action']);
-                        echo "<span class='log-badge log-$action_key'>$action_key</span>";
-                        ?>
-                    </td>
-                    <td style="max-width:340px;word-break:break-word"><?php echo htmlspecialchars($row['Details']); ?></td>
-                    <td style="font-family:monospace;font-size:.8rem"><?php echo htmlspecialchars($row['IPAddress']); ?></td>
-                    <td style="white-space:nowrap;font-size:.8rem">
-                        <?php
-                        $t = $row['LogTime'];
-                        echo $t instanceof DateTime
-                            ? $t->format('Y-m-d H:i:s')
-                            : htmlspecialchars((string)$t);
-                        ?>
-                    </td>
-                </tr>
-            <?php endforeach; ?>
-            </tbody>
-        </table>
+                        </td>
+                    </tr>
+                    <?php endforeach; ?>
+                </tbody>
+            </table>
+        </div>
     </div>
     <?php endif; ?>
-</div>
-<?php endif; ?>
 
-<!-- PROFILE -->
-<div id="tab-profile" class="tab-content">
-    <div class="section-title" style="margin-top:0">Edit Profile</div>
-    <div class="form-card">
-        <form method="POST">
-            <input type="hidden" name="action" value="update_profile">
-            <div class="form-group">
-                <label>Full Name</label>
-                <input type="text" name="fullname"
-                       value="<?php echo htmlspecialchars($profile['FullName'] ?? ''); ?>" required>
+    <div id="tab-log" class="tab-content">
+        <div class="section-title" style="margin-top:0">
+            Activity Log <?php echo $is_admin ? '(All Users)' : '(Your Actions)'; ?>
+        </div>
+
+        <?php if ($is_admin): ?>
+        <div class="log-filters">
+            <div>
+                <label style="font-size:.7rem;margin-bottom:.2rem;display:block;color:var(--dim)">ACTION</label>
+                <select id="filter-action">
+                    <option value="">All Actions</option>
+                    <?php foreach (array('INSERT_EMP','INSERT_DEPT','UPDATE_EMP','DELETE_EMP','DELETE_USER','CHANGE_ROLE','BLOCK_USER','UNBLOCK_USER','UPDATE_PROFILE','CHANGE_PASSWORD') as $a): ?>
+                        <option value="<?php echo $a; ?>" <?php echo $log_filter_action === $a ? 'selected' : ''; ?>><?php echo $a; ?></option>
+                    <?php endforeach; ?>
+                </select>
             </div>
-            <div class="form-group">
-                <label>Email (cannot change)</label>
-                <input type="email" value="<?php echo htmlspecialchars($profile['Email'] ?? ''); ?>"
-                       disabled style="opacity:.5;cursor:not-allowed">
+            <div>
+                <label style="font-size:.7rem;margin-bottom:.2rem;display:block;color:var(--dim)">USER NAME</label>
+                <input type="text" id="filter-user" placeholder="Search name..." value="<?php echo htmlspecialchars($log_filter_user); ?>">
             </div>
-            <div class="form-group">
-                <label>City</label>
-                <input type="text" name="city"
-                       value="<?php echo htmlspecialchars($profile['City'] ?? ''); ?>" required>
+            <button class="btn-primary" style="padding:.5rem 1rem;font-size:.85rem" onclick="applyLogFilter()">Filter</button>
+            <button class="btn-secondary" style="padding:.5rem 1rem;font-size:.85rem" onclick="resetLogFilter()">Reset</button>
+        </div>
+        <?php endif; ?>
+
+        <?php if (empty($activity_log)): ?>
+            <p style="color:var(--dim);font-style:italic">No activity recorded yet.</p>
+        <?php else: ?>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>#</th>
+                            <?php if ($is_admin): ?><th>User</th><?php endif; ?>
+                            <th>Action</th>
+                            <th>Details</th>
+                            <th>IP</th>
+                            <th>Time</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php foreach ($activity_log as $i => $entry): ?>
+                        <tr>
+                            <td><?php echo $i + 1; ?></td>
+                            <?php if ($is_admin): ?><td><?php echo htmlspecialchars($entry['UserName']); ?></td><?php endif; ?>
+                            <td>
+                                <?php
+                                $ac = htmlspecialchars($entry['Action']);
+                                $cls = 'action-' . $ac;
+                                echo "<span class='action-badge $cls'>$ac</span>";
+                                ?>
+                            </td>
+                            <td><?php echo htmlspecialchars($entry['Details'] ?? ''); ?></td>
+                            <td style="font-family:var(--mono);font-size:.75rem;color:var(--dim)"><?php echo htmlspecialchars($entry['IPAddress'] ?? ''); ?></td>
+                            <td style="font-family:var(--mono);font-size:.75rem;color:var(--dim)">
+                                <?php
+                                $t = $entry['CreatedAt'];
+                                echo $t instanceof DateTime ? $t->format('Y-m-d H:i:s') : htmlspecialchars((string)$t);
+                                ?>
+                            </td>
+                        </tr>
+                        <?php endforeach; ?>
+                    </tbody>
+                </table>
             </div>
-            <div class="form-group">
-                <label>University / Company</label>
-                <input type="text" name="university"
-                       value="<?php echo htmlspecialchars($profile['University'] ?? ''); ?>" required>
-            </div>
-            <button type="submit" class="btn-primary">Save Changes</button>
-        </form>
+        <?php endif; ?>
+    </div>
+
+    <div id="tab-profile" class="tab-content">
+        <div class="section-title" style="margin-top:0">Edit Profile</div>
+        <div class="form-card">
+            <form method="POST">
+                <input type="hidden" name="action" value="update_profile">
+                <div class="form-group"><label>Full Name</label><input type="text" name="fullname" value="<?php echo htmlspecialchars($profile['FullName'] ?? ''); ?>" required></div>
+                <div class="form-group"><label>Email (cannot change)</label><input type="email" value="<?php echo htmlspecialchars($profile['Email'] ?? ''); ?>" disabled></div>
+                <div class="form-group"><label>City</label><input type="text" name="city" value="<?php echo htmlspecialchars($profile['City'] ?? ''); ?>" required></div>
+                <div class="form-group"><label>University / Company</label><input type="text" name="university" value="<?php echo htmlspecialchars($profile['University'] ?? ''); ?>" required></div>
+                <button type="submit" class="btn-primary">Save Changes</button>
+            </form>
+        </div>
+    </div>
+
+    <div id="tab-password" class="tab-content">
+        <div class="section-title" style="margin-top:0">Change Password</div>
+        <div class="form-card">
+            <form method="POST">
+                <input type="hidden" name="action" value="change_password">
+                <div class="form-group"><label>Current Password</label><input type="password" name="old_password" required placeholder="••••••••"></div>
+                <div class="form-group"><label>New Password</label><input type="password" name="new_password" required placeholder="Min 8 chars, 1 uppercase, 1 number"></div>
+                <div class="form-group"><label>Confirm New Password</label><input type="password" name="confirm_password" required placeholder="Repeat new password"></div>
+                <button type="submit" class="btn-primary">Change Password</button>
+            </form>
+        </div>
     </div>
 </div>
-
-<!-- PASSWORD -->
-<div id="tab-password" class="tab-content">
-    <div class="section-title" style="margin-top:0">Change Password</div>
-    <div class="form-card">
-        <form method="POST">
-            <input type="hidden" name="action" value="change_password">
-            <div class="form-group">
-                <label>Current Password</label>
-                <input type="password" name="old_password" required>
-            </div>
-            <div class="form-group">
-                <label>New Password</label>
-                <input type="password" name="new_password"
-                       placeholder="Min 8 chars, 1 uppercase, 1 number" required>
-            </div>
-            <div class="form-group">
-                <label>Confirm New Password</label>
-                <input type="password" name="confirm_password"
-                       placeholder="Repeat new password" required>
-            </div>
-            <button type="submit" class="btn-primary">Change Password</button>
-        </form>
-    </div>
-</div>
-
-</div><!-- end .main -->
 
 <script>
 function switchTab(name, el) {
-    document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
-    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach(function(t) { t.classList.remove('active'); });
+    document.querySelectorAll('.tab').forEach(function(t) { t.classList.remove('active'); });
     document.getElementById('tab-' + name).classList.add('active');
-    el.classList.add('active');
+    if (el) el.classList.add('active');
 }
 
-function filterLog() {
-    const search = document.getElementById('log-search').value.toLowerCase();
-    const action = document.getElementById('log-action-filter').value.toLowerCase();
-    const rows   = document.querySelectorAll('#log-table tbody tr');
+(function () {
+    var initial = '<?php echo $initial_tab; ?>';
+    var btn = document.querySelector('[data-tab="' + initial + '"]');
+    switchTab(initial, btn);
+})();
 
-    rows.forEach(row => {
-        const user    = row.cells[1].textContent.toLowerCase();
-        const act     = row.cells[2].textContent.toLowerCase();
-        const details = row.cells[3].textContent.toLowerCase();
-
-        const matchSearch = !search || user.includes(search) || details.includes(search);
-        const matchAction = !action || act.includes(action);
-
-        row.style.display = (matchSearch && matchAction) ? '' : 'none';
-    });
+function applyLogFilter() {
+    var action = document.getElementById('filter-action').value;
+    var user = document.getElementById('filter-user').value;
+    var url = new URL(window.location.href);
+    url.searchParams.set('tab', 'log');
+    if (action) url.searchParams.set('log_action', action);
+    else url.searchParams.delete('log_action');
+    if (user) url.searchParams.set('log_user', user);
+    else url.searchParams.delete('log_user');
+    window.location.href = url.toString();
 }
 
-function clearLogFilter() {
-    document.getElementById('log-search').value = '';
-    document.getElementById('log-action-filter').value = '';
-    filterLog();
+function resetLogFilter() {
+    var url = new URL(window.location.href);
+    url.searchParams.set('tab', 'log');
+    url.searchParams.delete('log_action');
+    url.searchParams.delete('log_user');
+    window.location.href = url.toString();
 }
 </script>
+
 </body>
 </html>

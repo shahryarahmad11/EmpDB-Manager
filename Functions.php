@@ -37,6 +37,47 @@ function write_activity_log_as($username, $action, $details) {
     return $ok ? true : false;
 }
 
+function get_activity_log($limit = 200, $filter_action = '', $filter_user = '') {
+    $conn  = get_connection();
+    $rows  = array();
+    $params = array();
+
+    $sql = "SELECT TOP (?) UserName, Action, Details, IPAddress, LogTime AS CreatedAt
+            FROM ActivityLog
+            WHERE 1=1";
+    $params[] = (int)$limit;
+
+    if ($filter_action !== '') {
+        $sql .= " AND Action = ?";
+        $params[] = $filter_action;
+    }
+
+    if ($filter_user !== '') {
+        $sql .= " AND UserName LIKE ?";
+        $params[] = '%' . $filter_user . '%';
+    }
+
+    $sql .= " ORDER BY LogTime DESC";
+
+    $result = sqlsrv_query($conn, $sql, $params);
+
+    if ($result) {
+        while ($row = sqlsrv_fetch_array($result, SQLSRV_FETCH_ASSOC)) {
+            $rows[] = $row;
+        }
+    }
+
+    sqlsrv_close($conn);
+    return $rows;
+}
+
+/* -----------------------------------------------
+   log_activity — alias used in dashboard.php
+----------------------------------------------- */
+function log_activity($action, $details) {
+    return write_activity_log($action, $details);
+}
+
 /* -----------------------------------------------
    Get all table names from database
 ----------------------------------------------- */
@@ -158,9 +199,7 @@ function search_employee_by_id($empno, $table = 'all') {
                 $rows[] = $row;
             }
         }
-        if (!empty($rows)) {
-            $data['EMP'] = $rows;
-        }
+        if (!empty($rows)) $data['EMP'] = $rows;
     }
 
     if ($table === 'DEPT' || $table === 'all') {
@@ -176,9 +215,7 @@ function search_employee_by_id($empno, $table = 'all') {
                 $rows[] = $row;
             }
         }
-        if (!empty($rows)) {
-            $data['DEPT'] = $rows;
-        }
+        if (!empty($rows)) $data['DEPT'] = $rows;
     }
 
     if ($table === 'SALGRADE' || $table === 'all') {
@@ -195,9 +232,7 @@ function search_employee_by_id($empno, $table = 'all') {
                 $rows[] = $row;
             }
         }
-        if (!empty($rows)) {
-            $data['SALGRADE'] = $rows;
-        }
+        if (!empty($rows)) $data['SALGRADE'] = $rows;
     }
 
     if ($table === 'Project' || $table === 'all') {
@@ -214,9 +249,7 @@ function search_employee_by_id($empno, $table = 'all') {
                 $rows[] = $row;
             }
         }
-        if (!empty($rows)) {
-            $data['Project'] = $rows;
-        }
+        if (!empty($rows)) $data['Project'] = $rows;
     }
 
     sqlsrv_close($conn);
@@ -253,10 +286,7 @@ function insert_employee($empno, $ename, $job, $mgr, $hiredate, $sal, $comm, $de
     ));
 
     if ($ok) {
-        write_activity_log(
-            'INSERT_EMP',
-            "Inserted employee EMPNO=$empno, Name=$ename, Job=$job, DeptNo=" . ($deptno ?? 'NULL')
-        );
+        write_activity_log('INSERT_EMP', "Inserted employee EMPNO=$empno, Name=$ename, Job=$job, DeptNo=" . ($deptno ?? 'NULL'));
         $msg = "Employee inserted successfully.";
     } else {
         $msg = "Error: " . print_r(sqlsrv_errors(), true);
@@ -285,10 +315,7 @@ function insert_department($deptno, $dname, $loc) {
     $ok = sqlsrv_query($conn, $sql, array($deptno, $dname, $loc));
 
     if ($ok) {
-        write_activity_log(
-            'INSERT_DEPT',
-            "Inserted department DEPTNO=$deptno, Name=$dname, Location=$loc"
-        );
+        write_activity_log('INSERT_DEPT', "Inserted department DEPTNO=$deptno, Name=$dname, Location=$loc");
         $msg = "Department inserted successfully.";
     } else {
         $msg = "Error: " . print_r(sqlsrv_errors(), true);
@@ -327,10 +354,7 @@ function update_employee($empno, $ename, $job, $sal, $comm, $deptno) {
     ));
 
     if ($ok) {
-        write_activity_log(
-            'UPDATE_EMP',
-            "Updated employee EMPNO=$empno, Name=$ename, Job=$job, Salary=$sal, DeptNo=" . ($deptno ?? 'NULL')
-        );
+        write_activity_log('UPDATE_EMP', "Updated employee EMPNO=$empno, Name=$ename, Job=$job, Salary=$sal, DeptNo=" . ($deptno ?? 'NULL'));
         $msg = "Employee updated successfully.";
     } else {
         $msg = "Error: " . print_r(sqlsrv_errors(), true);
@@ -352,11 +376,7 @@ function delete_employee($empno) {
         return "Error: Invalid employee number.";
     }
 
-    $check_emp = sqlsrv_query(
-        $conn,
-        "SELECT EMPNO, ENAME FROM EMP WHERE EMPNO = ?",
-        array($empno)
-    );
+    $check_emp = sqlsrv_query($conn, "SELECT EMPNO, ENAME FROM EMP WHERE EMPNO = ?", array($empno));
     $emp_row = $check_emp ? sqlsrv_fetch_array($check_emp, SQLSRV_FETCH_ASSOC) : null;
 
     if (!$emp_row) {
@@ -364,11 +384,7 @@ function delete_employee($empno) {
         return "Error: Employee not found.";
     }
 
-    $check_proj = sqlsrv_query(
-        $conn,
-        "SELECT COUNT(*) AS total FROM ProjAssign WHERE EMPNO = ?",
-        array($empno)
-    );
+    $check_proj = sqlsrv_query($conn, "SELECT COUNT(*) AS total FROM ProjAssign WHERE EMPNO = ?", array($empno));
     $proj_row = $check_proj ? sqlsrv_fetch_array($check_proj, SQLSRV_FETCH_ASSOC) : null;
     $assigned_count = $proj_row ? (int)$proj_row['total'] : 0;
 
@@ -377,17 +393,10 @@ function delete_employee($empno) {
         return "Error: Cannot delete employee #$empno because they are assigned to $assigned_count project(s). Remove the project assignment(s) first.";
     }
 
-    $ok = sqlsrv_query(
-        $conn,
-        "DELETE FROM EMP WHERE EMPNO = ?",
-        array($empno)
-    );
+    $ok = sqlsrv_query($conn, "DELETE FROM EMP WHERE EMPNO = ?", array($empno));
 
     if ($ok) {
-        write_activity_log(
-            'DELETE_EMP',
-            "Deleted employee EMPNO=" . $emp_row['EMPNO'] . ", Name=" . $emp_row['ENAME']
-        );
+        write_activity_log('DELETE_EMP', "Deleted employee EMPNO=" . $emp_row['EMPNO'] . ", Name=" . $emp_row['ENAME']);
         $msg = "Employee deleted successfully.";
     } else {
         $msg = "Error: " . print_r(sqlsrv_errors(), true);
