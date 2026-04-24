@@ -1,12 +1,12 @@
 <?php
 if (session_status() === PHP_SESSION_NONE) {
+    ini_set('session.use_strict_mode', 1); // ← moved here, works on all PHP versions
     session_set_cookie_params([
-        'lifetime'      => 0,          // session cookie dies when browser closes
-        'path'          => '/',
-        'secure'        => isset($_SERVER['HTTPS']),
-        'httponly'      => true,        // JS cannot steal the cookie
-        'samesite'      => 'Strict',    // CSRF protection
-        'use_strict_mode' => true,
+        'lifetime' => 0,          // session cookie dies when browser closes
+        'path'     => '/',
+        'secure'   => isset($_SERVER['HTTPS']),
+        'httponly' => true,        // JS cannot steal the cookie
+        'samesite' => 'Strict',    // CSRF protection
     ]);
     session_start();
 }
